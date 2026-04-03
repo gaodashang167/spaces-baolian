@@ -159,9 +159,17 @@ EOF
 
 # 6. 执行恢复
 # ── 6a. 从 GitHub 备份仓库恢复 ──────────────────────────────
-GITHUB_TOKEN_FILE="/root/.backup-secrets/github-token"
-if [ -f "$GITHUB_TOKEN_FILE" ]; then
-  GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE")
+# 优先用环境变量 GITHUB_TOKEN，兼容旧的文件方式
+if [ -f "/root/.backup-secrets/github-token" ]; then
+  GITHUB_TOKEN=$(cat "/root/.backup-secrets/github-token")
+elif [ -n "$GITHUB_TOKEN" ]; then
+  # 从环境变量写入，保证重启后持久化
+  mkdir -p /root/.backup-secrets
+  echo -n "$GITHUB_TOKEN" > /root/.backup-secrets/github-token
+  chmod 600 /root/.backup-secrets/github-token
+fi
+
+if [ -n "$GITHUB_TOKEN" ]; then
   GITHUB_REPO_URL="https://gaodashang167:${GITHUB_TOKEN}@github.com/gaodashang167/openclaw-backup.git"
   echo ">>> 检查 GitHub 备份仓库..."
   REMOTE_HEAD=$(git ls-remote --heads "$GITHUB_REPO_URL" main 2>/dev/null)
