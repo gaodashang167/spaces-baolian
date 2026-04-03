@@ -99,6 +99,7 @@ TGEOF
   }
 }
 TGEOF
+  fi
 
 # 创建nginx配置
 cat > /etc/nginx/nginx.conf <<'EOF'
