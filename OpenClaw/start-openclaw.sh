@@ -162,7 +162,7 @@ EOF
 GITHUB_TOKEN_FILE="/root/.backup-secrets/github-token"
 if [ -f "$GITHUB_TOKEN_FILE" ]; then
   GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE")
-  GITHUB_REPO_URL="https://laohu169:${GITHUB_TOKEN}@github.com/laohu169/openclaw-backup.git"
+  GITHUB_REPO_URL="https://gaodashang167:${GITHUB_TOKEN}@github.com/gaodashang167/openclaw-backup.git"
   echo ">>> 检查 GitHub 备份仓库..."
   REMOTE_HEAD=$(git ls-remote --heads "$GITHUB_REPO_URL" main 2>/dev/null)
   if [ -n "$REMOTE_HEAD" ]; then
@@ -174,7 +174,7 @@ if [ -f "$GITHUB_TOKEN_FILE" ]; then
         dest="/tmp/openclaw-gitrestore/src${src}"
         if [ -d "$dest" ]; then
           mkdir -p "$src"
-          cp -rn "${dest}/" "${src}/" 2>/dev/null || cp -r "${dest}/" "${src}/"
+          tar cf - -C "$dest" --exclude='.git' . 2>/dev/null | tar xf - -C "$src" --no-same-owner 2>/dev/null || cp -rf "${dest}/" "${src}/"
           echo "  📁 恢复: $src"
         fi
       done

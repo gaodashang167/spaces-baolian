@@ -11,7 +11,7 @@
 #
 
 # ---- GitHub 备份配置 ----
-GITHUB_REPO="https://github.com/laohu169/openclaw-backup.git"
+GITHUB_REPO="https://github.com/gaodashang167/openclaw-backup.git"
 GITHUB_TOKEN_FILE="/root/.backup-secrets/github-token"
 BACKUP_DIR="/tmp/openclaw-gitbackup"
 BACKUP_FILES="
@@ -29,6 +29,19 @@ OPENCLAW_PATHS="
 /root/.openclaw/openclaw.json
 "
 
+# ---- 工具函数: 复制目录但排除 .git ----
+copy_dir_no_git() {
+    src="$1"
+    dest="$2"
+    mkdir -p "$dest"
+    if command -v rsync >/dev/null 2>&1; then
+        rsync -a --exclude='.git' --delete "$src/" "$dest/"
+    else
+        # 用 tar 排除 .git
+        tar cf - -C "$src" --exclude='.git' . 2>/dev/null | tar xf - -C "$dest" --no-same-owner 2>/dev/null
+    fi
+}
+
 # ============================================================
 #  GitHub 备份
 # ============================================================
@@ -41,39 +54,37 @@ git_backup() {
     fi
 
     TOKEN=$(cat "$GITHUB_TOKEN_FILE")
-    REPO_URL="https://laohu169:${TOKEN}@github.com/laohu169/openclaw-backup.git"
+    REPO_URL="https://gaodashang167:${TOKEN}@github.com/gaodashang167/openclaw-backup.git"
 
     # 准备干净的工作目录
     rm -rf "$BACKUP_DIR"
     mkdir -p "$BACKUP_DIR"
 
     # clone 最新备份
-    if [ -d /tmp/openclaw-gitbackup/.git ]; then
+    cd /tmp
+    git clone --depth 1 "$REPO_URL" "$BACKUP_DIR" 2>&1 || {
+        echo ">>> 仓库为空，初始化"
+        rm -rf "$BACKUP_DIR"
+        git init "$BACKUP_DIR"
         cd "$BACKUP_DIR"
-        git pull "$REPO_URL" main 2>/dev/null || {
-            cd /tmp
-            rm -rf "$BACKUP_DIR"
-            git clone --depth 1 "$REPO_URL" "$BACKUP_DIR"
-            cd "$BACKUP_DIR"
-        }
-    else
-        cd /tmp
-        git clone --depth 1 "$REPO_URL" "$BACKUP_DIR"
-        cd "$BACKUP_DIR"
-    fi
+        git checkout -b main
+        git config user.email "openclaw@local"
+        git config user.name "openclaw"
+    }
 
+    cd "$BACKUP_DIR"
     git config user.email "openclaw@local"
     git config user.name "openclaw"
 
     # 同步记忆文件到备份目录
     for src in $BACKUP_FILES; do
         if [ -d "$src" ]; then
-            dest="$BACKUP_DIR/src/$(echo $src)"
+            dest="$BACKUP_DIR/src${src}"
             mkdir -p "$dest"
-            rsync -a --delete "$src" "$dest/" 2>/dev/null || cp -r "$src" "$dest"
+            copy_dir_no_git "$src" "$dest"
             echo "📁 同步目录: $src"
         elif [ -f "$src" ]; then
-            dest="$BACKUP_DIR/src/$(dirname $src)"
+            dest="$BACKUP_DIR/src/$(dirname "$src")"
             mkdir -p "$dest"
             cp -f "$src" "$dest/"
             echo "📄 同步文件: $src"
@@ -83,7 +94,6 @@ git_backup() {
     done
 
     # 提交变更
-    cd "$BACKUP_DIR"
     git add -A
     if git diff --cached --quiet; then
         echo "✅ 无变更，跳过提交"
@@ -108,7 +118,7 @@ git_restore() {
     fi
 
     TOKEN=$(cat "$GITHUB_TOKEN_FILE")
-    REPO_URL="https://laohu169:${TOKEN}@github.com/laohu169/openclaw-backup.git"
+    REPO_URL="https://gaodashang167:${TOKEN}@github.com/gaodashang167/openclaw-backup.git"
 
     # Clone 备份仓库
     rm -rf "/tmp/openclaw-gitrestore"
@@ -116,10 +126,10 @@ git_restore() {
 
     # 把文件还原到原地
     for src in $BACKUP_FILES; do
-        dest="/tmp/openclaw-gitrestore/src/$(echo $src)"
+        dest="/tmp/openclaw-gitrestore/src${src}"
         if [ -d "$dest" ]; then
             mkdir -p "$src"
-            rsync -a "$dest/" "$src/" 2>/dev/null || cp -r "$dest" "$src"
+            copy_dir_no_git "$dest" "$src"
             echo "📁 还原目录: $src"
         elif [ -f "$dest" ]; then
             mkdir -p "$(dirname "$src")"
