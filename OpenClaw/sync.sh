@@ -14,12 +14,8 @@
 GITHUB_REPO="https://github.com/gaodashang167/openclaw-backup.git"
 GITHUB_TOKEN_FILE="/root/.backup-secrets/github-token"
 BACKUP_DIR="/tmp/openclaw-gitbackup"
-BACKUP_FILES="
-/root/.openclaw/workspace/
-/root/.openclaw/sessions/
-/root/.openclaw/agents/main/sessions/
-/root/.openclaw/openclaw.json
-"
+# 备份 workspace、session 和配置文件
+BACKUP_FILES="/root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/ /root/.openclaw/openclaw.json"
 
 # ---- Rclone 配置（旧模式） ----
 OPENCLAW_PATHS="
@@ -31,15 +27,32 @@ OPENCLAW_PATHS="
 
 # ---- 工具函数: 复制目录但排除 .git ----
 copy_dir_no_git() {
-    src="$1"
-    dest="$2"
-    mkdir -p "$dest"
-    if command -v rsync >/dev/null 2>&1; then
-        rsync -a --exclude='.git' --delete "$src/" "$dest/"
-    else
-        # 用 tar 排除 .git
-        tar cf - -C "$src" --exclude='.git' . 2>/dev/null | tar xf - -C "$dest" --no-same-owner 2>/dev/null
-    fi
+  _s="$1"; _d="$2"
+  mkdir -p "$_d"
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --exclude='.git' --delete "$_s/" "$_d/"
+  else
+    tar cf - -C "$_s" --exclude='.git' . 2>/dev/null | tar xf - -C "$_d" --no-same-owner 2>/dev/null
+  fi
+}
+
+# ---- 工具函数: 敏感信息过滤 ----
+sanitize_tokens() {
+  # 替换所有 ghp_ 开头的 token，防止泄露到备份仓库
+  _file="$1"
+  if [ -f "$_file" ]; then
+    sed -i 's/ghp_[A-Za-z0-9]\{20,\}/[FILTERED_GITHUB_TOKEN]/g' "$_file"
+  fi
+}
+
+sanitize_dir_tokens() {
+  _dir="$1"
+  if [ -d "$_dir" ]; then
+    # 替换所有 ghp_ 开头的 token（包含下划线）
+    find "$_dir" -type f 2>/dev/null | while read -r _f; do
+      sed -i 's/ghp_[A-Za-z0-9_]\{20,\}/[FILTERED_GITHUB_TOKEN]/g' "$_f" 2>/dev/null
+    done
+  fi
 }
 
 # ============================================================
@@ -56,11 +69,8 @@ git_backup() {
     TOKEN=$(cat "$GITHUB_TOKEN_FILE")
     REPO_URL="https://gaodashang167:${TOKEN}@github.com/gaodashang167/openclaw-backup.git"
 
-    # 准备干净的工作目录
     rm -rf "$BACKUP_DIR"
-    mkdir -p "$BACKUP_DIR"
 
-    # clone 最新备份
     cd /tmp
     git clone --depth 1 "$REPO_URL" "$BACKUP_DIR" 2>&1 || {
         echo ">>> 仓库为空，初始化"
@@ -76,7 +86,6 @@ git_backup() {
     git config user.email "openclaw@local"
     git config user.name "openclaw"
 
-    # 同步记忆文件到备份目录
     for src in $BACKUP_FILES; do
         if [ -d "$src" ]; then
             dest="$BACKUP_DIR/src${src}"
@@ -93,7 +102,13 @@ git_backup() {
         fi
     done
 
-    # 提交变更
+    # 过滤敏感信息
+    echo "🔒 过滤敏感信息..."
+    sanitize_dir_tokens "$BACKUP_DIR/src/root"
+
+    # 添加 .gitignore 排除 token 文件（不应该被备份）
+    echo ".backup-secrets/" > "$BACKUP_DIR/.gitignore"
+
     git add -A
     if git diff --cached --quiet; then
         echo "✅ 无变更，跳过提交"
@@ -120,11 +135,9 @@ git_restore() {
     TOKEN=$(cat "$GITHUB_TOKEN_FILE")
     REPO_URL="https://gaodashang167:${TOKEN}@github.com/gaodashang167/openclaw-backup.git"
 
-    # Clone 备份仓库
     rm -rf "/tmp/openclaw-gitrestore"
     git clone --depth 1 "$REPO_URL" "/tmp/openclaw-gitrestore"
 
-    # 把文件还原到原地
     for src in $BACKUP_FILES; do
         dest="/tmp/openclaw-gitrestore/src${src}"
         if [ -d "$dest" ]; then
@@ -140,7 +153,6 @@ git_restore() {
         fi
     done
 
-    # 清理
     rm -rf "/tmp/openclaw-gitrestore"
     echo "✅ GitHub 还原完成"
 }
@@ -150,64 +162,38 @@ git_restore() {
 # ============================================================
 rclone_backup() {
     echo "=== 开始 rclone 备份 ==="
-
     for path in $OPENCLAW_PATHS; do
         if [ -d "$path" ]; then
             echo "📁 备份目录: $path"
             rclone mkdir "$REMOTE_FOLDER/$path" 2>/dev/null || true
-            rclone sync --checksum --progress --create-empty-src-dirs \
-                "$path" "$REMOTE_FOLDER/$path"
-            echo "✅ 完成: $path"
+            rclone sync --checksum --progress --create-empty-src-dirs "$path" "$REMOTE_FOLDER/$path"
         elif [ -f "$path" ]; then
             echo "📄 备份文件: $path"
-            parent_dir=$(dirname "$path")
-            rclone mkdir "$REMOTE_FOLDER$parent_dir/" 2>/dev/null || true
-            rclone copy --checksum --progress \
-                "$path" "$REMOTE_FOLDER$parent_dir/"
-            echo "✅ 完成: $path"
-        else
-            echo "⚠️ 路径不存在: $path"
+            rclone mkdir "$REMOTE_FOLDER$(dirname "$path")/" 2>/dev/null || true
+            rclone copy --checksum --progress "$path" "$REMOTE_FOLDER$(dirname "$path")/"
         fi
     done
-
     echo "=== rclone 备份完成 ==="
 }
 
 rclone_restore() {
     echo "=== 开始 rclone 还原 ==="
-
     for path in $OPENCLAW_PATHS; do
         if [ -d "$path" ] || [[ "$path" == */ ]]; then
-            echo "📁 还原目录: $path"
             mkdir -p "$path"
-            rclone sync --checksum --progress --create-empty-src-dirs \
-                "$REMOTE_FOLDER/$path" "$path"
-            echo "✅ 完成: $path"
+            rclone sync --checksum --progress --create-empty-src-dirs "$REMOTE_FOLDER/$path" "$path"
         else
-            echo "📄 还原文件: $path"
-            target_dir=$(dirname "$path")
-            mkdir -p "$target_dir"
-            parent_dir=$(dirname "$path")
-            filename=$(basename "$path")
-            rclone copy --checksum --progress \
-                "$REMOTE_FOLDER$parent_dir/$filename" "$target_dir/"
-            echo "✅ 完成: $path"
+            mkdir -p "$(dirname "$path")"
+            rclone copy --checksum --progress "$REMOTE_FOLDER$(dirname "$path")/$(basename "$path")" "$(dirname "$path")/"
         fi
     done
-
     echo "=== rclone 还原完成 ==="
 }
 
-# ============================================================
-#  入口
-# ============================================================
 case "$1" in
     backup)        rclone_backup ;;
     restore)       rclone_restore ;;
     git-backup)    git_backup ;;
     git-restore)   git_restore ;;
-    *)
-        echo "Usage: $0 {backup|restore|git-backup|git-restore}"
-        exit 1
-        ;;
+    *)             echo "Usage: $0 {backup|restore|git-backup|git-restore}"; exit 1 ;;
 esac
