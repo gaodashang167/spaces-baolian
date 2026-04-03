@@ -70,13 +70,25 @@ cat > /root/.openclaw/openclaw.json <<EOF
       "dangerouslyDisableDeviceAuth": true,
       "dangerouslyAllowHostHeaderOriginFallback": true
     }
-  }${TG_BOT_TOKEN:+,
+  }
+EOF
+
+# TG设置 -- 如设置了TG_BOT_TOKEN则追加channels配置
+if [ -n "$TG_BOT_TOKEN" ]; then
+  # 去掉最后的 }，追加 channels，再重新加上 }
+  sed -i '$ d' /root/.openclaw/openclaw.json
+  cat >> /root/.openclaw/openclaw.json <<TGEOF
+  ,
   "channels": {
     "telegram": {
       "enabled": true,
       "botToken": "$TG_BOT_TOKEN",
       "dmPolicy": "pairing",
-      "apiRoot": "${TG_API_ROOT}",
+TGEOF
+  if [ -n "$TG_API_ROOT" ]; then
+    echo "      \"apiRoot\": \"$TG_API_ROOT\"," >> /root/.openclaw/openclaw.json
+  fi
+  cat >> /root/.openclaw/openclaw.json <<TGEOF
       "groups": { "*": { "requireMention": true } },
       "webhookUrl": "https://wocaca-webopenclaw.hf.space/telegram/webhook",
       "webhookSecret": "$OPENCLAW_GATEWAY_PASSWORD",
@@ -84,8 +96,9 @@ cat > /root/.openclaw/openclaw.json <<EOF
       "webhookHost": "0.0.0.0",
       "webhookPort": 8787
     }
-  }}
-EOF
+  }
+}
+TGEOF
 
 # 创建nginx配置
 cat > /etc/nginx/nginx.conf <<'EOF'
