@@ -232,12 +232,12 @@ fi
 # 7. 运行
 openclaw doctor --fix
 
-# 启动定时备份
-# (while true; do
-#   sleep 3600
-#   echo ">>> Running scheduled backup..."
-#   ./sync.sh backup
-# done) &
+# 启动定时备份（每小时一次 GitHub 备份）
+(while true; do
+  sleep 3600
+  echo ">>> Running scheduled GitHub backup..."
+  cd /app && ./sync.sh git-backup >> /tmp/git-backup.log 2>&1
+done) &
 
 nginx -t
 if [ $? -ne 0 ]; then
