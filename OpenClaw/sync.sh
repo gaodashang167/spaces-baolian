@@ -15,7 +15,7 @@ GITHUB_REPO="https://github.com/gaodashang167/openclaw-backup.git"
 GITHUB_TOKEN_FILE="/root/.backup-secrets/github-token"
 BACKUP_DIR="/tmp/openclaw-gitbackup"
 # 备份 workspace、session 和配置文件
-BACKUP_FILES="/root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/ /root/.openclaw/openclaw.json"
+BACKUP_FILES="/root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/ /root/.openclaw/openclaw.json /root/.openclaw/credentials/ /root/.openclaw/identity/"
 
 # ---- Rclone 配置（旧模式） ----
 OPENCLAW_PATHS="
