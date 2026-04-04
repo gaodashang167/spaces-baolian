@@ -70,24 +70,13 @@ cat > /root/.openclaw/openclaw.json <<EOF
       "dangerouslyDisableDeviceAuth": true,
       "dangerouslyAllowHostHeaderOriginFallback": true
     }
-  }
-EOF
-
-# TG设置 -- 如设置了TG_BOT_TOKEN则追加channels配置
-if [ -n "$TG_BOT_TOKEN" ]; then
-  sed -i '$ d' /root/.openclaw/openclaw.json
-  cat >> /root/.openclaw/openclaw.json <<TGEOF
-,
-"channels": {
+  }${TG_BOT_TOKEN:+,
+  "channels": {
     "telegram": {
       "enabled": true,
       "botToken": "$TG_BOT_TOKEN",
       "dmPolicy": "pairing",
-TGEOF
-  if [ -n "$TG_API_ROOT" ]; then
-    printf '      "apiRoot": "%s",\n' "$TG_API_ROOT" >> /root/.openclaw/openclaw.json
-  fi
-  cat >> /root/.openclaw/openclaw.json <<TGEOF
+      "apiRoot": "${TG_API_ROOT}",
       "groups": { "*": { "requireMention": true } },
       "webhookUrl": "https://wocaca-webopenclaw.hf.space/telegram/webhook",
       "webhookSecret": "$OPENCLAW_GATEWAY_PASSWORD",
@@ -95,13 +84,11 @@ TGEOF
       "webhookHost": "0.0.0.0",
       "webhookPort": 8787
     }
-  }
-}
-TGEOF
-fi
+  }}
+EOF
 
 # 创建nginx配置
-cat > /etc/nginx/nginx.conf <<'NGINXEOF'
+cat > /etc/nginx/nginx.conf <<'EOF'
 worker_processes 1;
 events {
     worker_connections 1024;
@@ -164,13 +151,16 @@ http {
 
     }
 }
-NGINXEOF
+EOF
+
 
 # 6. 执行恢复
 # ── 6a. 从 GitHub 备份仓库恢复 ──────────────────────────────
+# 优先用环境变量 GITHUB_TOKEN，兼容旧的文件方式
 if [ -f "/root/.backup-secrets/github-token" ]; then
   GITHUB_TOKEN=$(cat "/root/.backup-secrets/github-token")
 elif [ -n "$GITHUB_TOKEN" ]; then
+  # 从环境变量写入，保证重启后持久化
   mkdir -p /root/.backup-secrets
   echo -n "$GITHUB_TOKEN" > /root/.backup-secrets/github-token
   chmod 600 /root/.backup-secrets/github-token
@@ -183,7 +173,7 @@ if [ -n "$GITHUB_TOKEN" ]; then
   if [ -n "$REMOTE_HEAD" ]; then
     echo ">>> GitHub 仓库有备份，开始恢复..."
     rm -rf /tmp/openclaw-gitrestore
-    git clone --depth 1 "$GITHUB_REPO_URL" /tmp/openclaw-gitrestore 2>/dev/null || { echo ">>> GitHub clone 失败，跳过"; }
+    git clone --depth 1 "$GITHUB_REPO_URL" /tmp/openclaw-gitrestore 2>&1 || { echo ">>> GitHub clone 失败，跳过"; }
     if [ -d /tmp/openclaw-gitrestore ]; then
       for src in /root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/; do
         dest="/tmp/openclaw-gitrestore/src${src}"
@@ -193,7 +183,15 @@ if [ -n "$GITHUB_TOKEN" ]; then
           echo "  📁 恢复: $src"
         fi
       done
-      # ⚠️ 跳过恢复 openclaw.json —— 它应由启动脚本用环境变量生成，否则覆盖后变量失效
+      # 还原配置文件（如果有）
+      for cfg_file in openclaw.json; do
+        src_file="/tmp/openclaw-gitrestore/src/root/.openclaw/${cfg_file}"
+        if [ -f "$src_file" ]; then
+          mkdir -p /root/.openclaw
+          cp -f "$src_file" "/root/.openclaw/${cfg_file}"
+          echo "  📄 恢复: /root/.openclaw/${cfg_file}"
+        fi
+      done
       rm -rf /tmp/openclaw-gitrestore
       echo ">>> GitHub 恢复完成"
     fi
@@ -204,23 +202,30 @@ else
   echo ">>> 未配置 GitHub 备份，跳过恢复"
 fi
 
-echo "======================写入rclone配置========================"
+echo  "======================写入rclone配置========================\n"
 echo "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
 
 if [ -n "$RCLONE_CONF" ]; then
   echo "##########同步备份############"
-  rclone mkdir "$REMOTE_FOLDER"
+  # 为了防止不存在目录报错
+  rclone mkdir $REMOTE_FOLDER
+  # 使用 rclone ls 命令列出文件夹内容，将输出和错误分别捕获
   OUTPUT=$(rclone ls "$REMOTE_FOLDER" 2>&1)
+  # 获取 rclone 命令的退出状态码
   EXIT_CODE=$?
+  #echo "rclone退出代码:$EXIT_CODE"
+  # 判断退出状态码
   if [ $EXIT_CODE -eq 0 ]; then
+    # rclone 命令成功执行，检查文件夹是否为空
     if [ -z "$OUTPUT" ]; then
+      #为空不处理
       echo "初次安装"
     else
         echo "远程文件夹不为空开始还原"
         ./sync.sh restore
         echo "恢复完成."   
     fi
-  elif echo "$OUTPUT" | grep -q "directory not found"; then
+  elif [[ "$OUTPUT" == *"directory not found"* ]]; then
     echo "错误：文件夹不存在"
   else
     echo "错误：$OUTPUT"
@@ -246,17 +251,19 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-# 启动 nginx 后台运行
-nginx
+# 启动 nginx 前台运行
+nginx -g 'daemon off;' &
 
 # 使用 pm2 启动 openclaw
 pm2 start "openclaw gateway run --port 7861" --name openclaw
 
-echo "======================启动code-server服务========================"
-export PASSWORD="$OPENCLAW_GATEWAY_PASSWORD"
+echo -e "======================启动code-server服务========================\n"
+export PASSWORD=$OPENCLAW_GATEWAY_PASSWORD
 pm2 start "code-server --bind-addr 0.0.0.0:7862 --port 7862" --name "code-server"
 pm2 startup
 pm2 save
 
-# 保持容器运行
+# 使用 pm2 持续运行，保持容器不退出 需要的话开启
+# pm2 logs
+
 tail -f /dev/null
