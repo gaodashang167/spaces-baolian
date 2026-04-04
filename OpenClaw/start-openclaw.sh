@@ -29,19 +29,47 @@ else
     echo ">>> Chromium found: $CHROMIUM_PATH"
 fi
 
-# 4. 处理 API 地址
-CLEAN_BASE=$(echo "$OPENAI_API_BASE" | sed "s|/chat/completions||g" | sed "s|/v1/|/v1|g" | sed "s|/v1$|/v1|g")
+# ── 4. 生成 openclaw.json（始终用环境变量，不从备份恢复）────────
+echo ">>> DEBUG: OPENAI_API_BASE=${OPENAI_API_BASE}"
+echo ">>> DEBUG: MODEL=${MODEL}"
+echo ">>> DEBUG: OPENAI_API_KEY=$([ -n "$OPENAI_API_KEY" ] && echo '(set)' || echo '(EMPTY)')"
+echo ">>> DEBUG: OPENCLAW_GATEWAY_PASSWORD=$([ -n "$OPENCLAW_GATEWAY_PASSWORD" ] && echo '(set)' || echo '(EMPTY)')"
 
-# 4. 生成配置文件（始终用环境变量重新生成，不从备份恢复）
-python3 - <<PYEOF
-import json, os
+# 处理API地址并export给Python
+CLEAN_BASE=$(echo "$OPENAI_API_BASE" | sed "s|/chat/completions||g" | sed "s|/v1/$|/v1|g" | sed "s|/v1$|/v1|g" | sed "s|/v1/|/v1|g" | sed 's|/$||g')
+export CLEAN_BASE
+export OPENAI_API_KEY
+export MODEL
+export OPENCLAW_GATEWAY_PASSWORD
+export TG_BOT_TOKEN
+export TG_API_ROOT
 
-clean_base       = os.environ.get("CLEAN_BASE", "")
-api_key          = os.environ.get("OPENAI_API_KEY", "")
-model            = os.environ.get("MODEL", "")
-gw_password      = os.environ.get("OPENCLAW_GATEWAY_PASSWORD", "")
-tg_bot_token     = os.environ.get("TG_BOT_TOKEN", "")
-tg_api_root      = os.environ.get("TG_API_ROOT", "")
+echo ">>> DEBUG: CLEAN_BASE=${CLEAN_BASE}"
+
+python3 <<'PYEOF'
+import json, os, sys
+
+clean_base   = os.environ.get("CLEAN_BASE", "")
+api_key      = os.environ.get("OPENAI_API_KEY", "")
+model        = os.environ.get("MODEL", "")
+gw_password  = os.environ.get("OPENCLAW_GATEWAY_PASSWORD", "")
+tg_bot_token = os.environ.get("TG_BOT_TOKEN", "")
+tg_api_root  = os.environ.get("TG_API_ROOT", "")
+
+errors = []
+if not clean_base:
+    errors.append("OPENAI_API_BASE is empty")
+if not api_key:
+    errors.append("OPENAI_API_KEY is empty")
+if not model:
+    errors.append("MODEL is empty")
+if not gw_password:
+    errors.append("OPENCLAW_GATEWAY_PASSWORD is empty")
+if errors:
+    print(">>> ERROR: Missing required env vars:")
+    for e in errors:
+        print(f"    - {e}")
+    sys.exit(1)
 
 cfg = {
     "models": {
@@ -95,10 +123,11 @@ out = json.dumps(cfg, indent=2, ensure_ascii=False)
 with open("/root/.openclaw/openclaw.json", "w") as f:
     f.write(out)
 print(">>> openclaw.json generated OK")
+print(f">>> baseUrl={clean_base!r}, model={model!r}")
 PYEOF
 
 # 创建nginx配置
-cat > /etc/nginx/nginx.conf <<'EOF'
+cat > /etc/nginx/nginx.conf <<'NGINXEOF'
 worker_processes 1;
 events {
     worker_connections 1024;
@@ -129,7 +158,6 @@ http {
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection $connection_upgrade;
             proxy_set_header X-Forwarded-Host $host;
-            # 连接失败时重试，避免启动期间502
             proxy_connect_timeout 5s;
             proxy_next_upstream error timeout http_502 http_503;
             proxy_next_upstream_tries 3;
@@ -162,14 +190,12 @@ http {
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $scheme;
         }
-
     }
 }
-EOF
+NGINXEOF
 
 
 # 6. 执行恢复
-# ── 6a. 从 GitHub 备份仓库恢复（跳过 openclaw.json，始终用环境变量生成的版本）──
 if [ -f "/root/.backup-secrets/github-token" ]; then
   GITHUB_TOKEN=$(cat "/root/.backup-secrets/github-token")
 elif [ -n "$GITHUB_TOKEN" ]; then
@@ -195,7 +221,6 @@ if [ -n "$GITHUB_TOKEN" ]; then
           echo "  📁 恢复: $src"
         fi
       done
-      # ⚠️ 注意：openclaw.json 不从备份恢复，始终使用环境变量生成的版本
       echo "  ⏭️  跳过恢复: /root/.openclaw/openclaw.json（使用环境变量生成的版本）"
       rm -rf /tmp/openclaw-gitrestore
       echo ">>> GitHub 恢复完成"
@@ -207,7 +232,7 @@ else
   echo ">>> 未配置 GitHub 备份，跳过恢复"
 fi
 
-echo  "======================写入rclone配置========================\n"
+echo "======================写入rclone配置========================"
 echo "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
 
 if [ -n "$RCLONE_CONF" ]; then
@@ -221,7 +246,7 @@ if [ -n "$RCLONE_CONF" ]; then
     else
         echo "远程文件夹不为空开始还原"
         ./sync.sh restore
-        echo "恢复完成."   
+        echo "恢复完成."
     fi
   elif [[ "$OUTPUT" == *"directory not found"* ]]; then
     echo "错误：文件夹不存在"
@@ -235,7 +260,7 @@ fi
 # 7. 运行
 openclaw doctor --fix
 
-# 启动定时备份（每小时一次 GitHub 备份）
+# 启动定时备份
 (while true; do
   sleep 3600
   echo ">>> Running scheduled GitHub backup..."
@@ -249,33 +274,25 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-# 使用 pm2 启动 openclaw（先启动，再启动 nginx）
+# 先启动 openclaw，等端口就绪再启动 nginx
 pm2 start "openclaw gateway run --port 7861" --name openclaw
 
-# 等待 openclaw gateway 在 7861 端口就绪，最多等 60 秒
 echo ">>> 等待 openclaw gateway 在 7861 端口就绪..."
 for i in $(seq 1 60); do
-  if curl -sf http://127.0.0.1:7861/ > /dev/null 2>&1 || \
-     curl -sf http://127.0.0.1:7861/health > /dev/null 2>&1; then
-    echo ">>> openclaw gateway 已就绪（${i}s）"
-    break
-  fi
-  # 备用检测：端口是否被监听
-  if ss -tlnp 2>/dev/null | grep -q ':7861 ' || \
-     netstat -tlnp 2>/dev/null | grep -q ':7861 '; then
+  if ss -tlnp 2>/dev/null | grep -q ':7861'; then
     echo ">>> openclaw gateway 端口已监听（${i}s）"
     break
   fi
   if [ $i -eq 60 ]; then
-    echo ">>> WARN: openclaw gateway 60s 内未就绪，继续启动 nginx（可能短暂出现502）"
+    echo ">>> WARN: openclaw gateway 60s 内未就绪，打印pm2日志："
+    pm2 logs openclaw --lines 30 --nostream || true
   fi
   sleep 1
 done
 
-# 启动 nginx 前台运行
 nginx -g 'daemon off;' &
 
-echo -e "======================启动code-server服务========================\n"
+echo "======================启动code-server服务========================"
 export PASSWORD=$OPENCLAW_GATEWAY_PASSWORD
 pm2 start "code-server --bind-addr 0.0.0.0:7862 --port 7862" --name "code-server"
 pm2 startup
