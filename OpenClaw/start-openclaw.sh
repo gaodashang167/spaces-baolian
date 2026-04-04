@@ -71,24 +71,35 @@ cat > /root/.openclaw/openclaw.json <<EOF
       "dangerouslyAllowHostHeaderOriginFallback": true
     }
   }
-}
 EOF
 
- # TG设置示例  抱脸不支持TG的API 需要设置apiRoot为TG代理网址
- # "channels": {
- #    "telegram": {
- #      "enabled": true,
- #      "botToken": "机器人Token",
- #      "dmPolicy": "pairing",
- #      "apiRoot": "https://xxxxx.com",
- #      "groups": { "*": { "requireMention": true } },
- #      "webhookUrl": "https://抱脸用户名-抱脸空间名.hf.space/telegram/webhook",
- #      "webhookSecret": "$OPENCLAW_GATEWAY_PASSWORD",
- #      "webhookPath": "/telegram/webhook",
- #      "webhookHost": "0.0.0.0",
- #      "webhookPort": 8787,
- #    }
- #  }
+# TG设置 -- 如设置了TG_BOT_TOKEN则追加channels配置
+if [ -n "$TG_BOT_TOKEN" ]; then
+  # 去掉最后的 }，追加 channels，再重新加上 }
+  sed -i '$ d' /root/.openclaw/openclaw.json
+  cat >> /root/.openclaw/openclaw.json <<TGEOF
+  ,
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "botToken": "$TG_BOT_TOKEN",
+      "dmPolicy": "pairing",
+TGEOF
+  if [ -n "$TG_API_ROOT" ]; then
+    echo "      \"apiRoot\": \"$TG_API_ROOT\"," >> /root/.openclaw/openclaw.json
+  fi
+  cat >> /root/.openclaw/openclaw.json <<TGEOF
+      "groups": { "*": { "requireMention": true } },
+      "webhookUrl": "https://wocaca-webopenclaw.hf.space/telegram/webhook",
+      "webhookSecret": "$OPENCLAW_GATEWAY_PASSWORD",
+      "webhookPath": "/telegram/webhook",
+      "webhookHost": "0.0.0.0",
+      "webhookPort": 8787
+    }
+  }
+}
+TGEOF
+  fi
 
 # 创建nginx配置
 cat > /etc/nginx/nginx.conf <<'EOF'
@@ -158,6 +169,53 @@ EOF
 
 
 # 6. 执行恢复
+# ── 6a. 从 GitHub 备份仓库恢复 ──────────────────────────────
+# 优先用环境变量 GITHUB_TOKEN，兼容旧的文件方式
+if [ -f "/root/.backup-secrets/github-token" ]; then
+  GITHUB_TOKEN=$(cat "/root/.backup-secrets/github-token")
+elif [ -n "$GITHUB_TOKEN" ]; then
+  # 从环境变量写入，保证重启后持久化
+  mkdir -p /root/.backup-secrets
+  echo -n "$GITHUB_TOKEN" > /root/.backup-secrets/github-token
+  chmod 600 /root/.backup-secrets/github-token
+fi
+
+if [ -n "$GITHUB_TOKEN" ]; then
+  GITHUB_REPO_URL="https://gaodashang167:${GITHUB_TOKEN}@github.com/gaodashang167/openclaw-backup.git"
+  echo ">>> 检查 GitHub 备份仓库..."
+  REMOTE_HEAD=$(git ls-remote --heads "$GITHUB_REPO_URL" main 2>/dev/null)
+  if [ -n "$REMOTE_HEAD" ]; then
+    echo ">>> GitHub 仓库有备份，开始恢复..."
+    rm -rf /tmp/openclaw-gitrestore
+    git clone --depth 1 "$GITHUB_REPO_URL" /tmp/openclaw-gitrestore 2>&1 || { echo ">>> GitHub clone 失败，跳过"; }
+    if [ -d /tmp/openclaw-gitrestore ]; then
+      for src in /root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/ /root/.openclaw/credentials/ /root/.openclaw/identity/; do
+        dest="/tmp/openclaw-gitrestore/src${src}"
+        if [ -d "$dest" ]; then
+          mkdir -p "$src"
+          tar cf - -C "$dest" --exclude='.git' . 2>/dev/null | tar xf - -C "$src" --no-same-owner 2>/dev/null || cp -rf "${dest}/" "${src}/"
+          echo "  📁 恢复: $src"
+        fi
+      done
+      # 还原配置文件（如果有）
+      for cfg_file in openclaw.json; do
+        src_file="/tmp/openclaw-gitrestore/src/root/.openclaw/${cfg_file}"
+        if [ -f "$src_file" ]; then
+          mkdir -p /root/.openclaw
+          cp -f "$src_file" "/root/.openclaw/${cfg_file}"
+          echo "  📄 恢复: /root/.openclaw/${cfg_file}"
+        fi
+      done
+      rm -rf /tmp/openclaw-gitrestore
+      echo ">>> GitHub 恢复完成"
+    fi
+  else
+    echo ">>> GitHub 仓库无备份记录，跳过恢复"
+  fi
+else
+  echo ">>> 未配置 GitHub 备份，跳过恢复"
+fi
+
 echo  "======================写入rclone配置========================\n"
 echo "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
 
@@ -193,12 +251,12 @@ fi
 # 7. 运行
 openclaw doctor --fix
 
-# 启动定时备份
-# (while true; do
-#   sleep 3600
-#   echo ">>> Running scheduled backup..."
-#   ./sync.sh backup
-# done) &
+# 启动定时备份（每小时一次 GitHub 备份）
+(while true; do
+  sleep 3600
+  echo ">>> Running scheduled GitHub backup..."
+  cd /app && ./sync.sh git-backup >> /tmp/git-backup.log 2>&1
+done) &
 
 nginx -t
 if [ $? -ne 0 ]; then
