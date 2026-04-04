@@ -193,14 +193,7 @@ if [ -n "$GITHUB_TOKEN" ]; then
           echo "  📁 恢复: $src"
         fi
       done
-      for cfg_file in openclaw.json; do
-        src_file="/tmp/openclaw-gitrestore/src/root/.openclaw/${cfg_file}"
-        if [ -f "$src_file" ]; then
-          mkdir -p /root/.openclaw
-          cp -f "$src_file" "/root/.openclaw/${cfg_file}"
-          echo "  📄 恢复: /root/.openclaw/${cfg_file}"
-        fi
-      done
+      # ⚠️ 跳过恢复 openclaw.json —— 它应由启动脚本用环境变量生成，否则覆盖后变量失效
       rm -rf /tmp/openclaw-gitrestore
       echo ">>> GitHub 恢复完成"
     fi
