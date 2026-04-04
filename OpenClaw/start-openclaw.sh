@@ -70,22 +70,25 @@ cat > /root/.openclaw/openclaw.json <<EOF
       "dangerouslyDisableDeviceAuth": true,
       "dangerouslyAllowHostHeaderOriginFallback": true
     }
-  }${TG_BOT_TOKEN:+,
-  "channels": {
-    "telegram": {
-      "enabled": true,
-      "botToken": "$TG_BOT_TOKEN",
-      "dmPolicy": "pairing",
-      "apiRoot": "${TG_API_ROOT}",
-      "groups": { "*": { "requireMention": true } },
-      "webhookUrl": "https://wocaca-webopenclaw.hf.space/telegram/webhook",
-      "webhookSecret": "$OPENCLAW_GATEWAY_PASSWORD",
-      "webhookPath": "/telegram/webhook",
-      "webhookHost": "0.0.0.0",
-      "webhookPort": 8787
-    }
-  }}
+  }
+}
 EOF
+
+ # TG设置示例  抱脸不支持TG的API 需要设置apiRoot为TG代理网址
+ # "channels": {
+ #    "telegram": {
+ #      "enabled": true,
+ #      "botToken": "机器人Token",
+ #      "dmPolicy": "pairing",
+ #      "apiRoot": "https://xxxxx.com",
+ #      "groups": { "*": { "requireMention": true } },
+ #      "webhookUrl": "https://抱脸用户名-抱脸空间名.hf.space/telegram/webhook",
+ #      "webhookSecret": "$OPENCLAW_GATEWAY_PASSWORD",
+ #      "webhookPath": "/telegram/webhook",
+ #      "webhookHost": "0.0.0.0",
+ #      "webhookPort": 8787,
+ #    }
+ #  }
 
 # 创建nginx配置
 cat > /etc/nginx/nginx.conf <<'EOF'
