@@ -189,7 +189,7 @@ if [ -n "$GITHUB_TOKEN" ]; then
     rm -rf /tmp/openclaw-gitrestore
     git clone --depth 1 "$GITHUB_REPO_URL" /tmp/openclaw-gitrestore 2>&1 || { echo ">>> GitHub clone 失败，跳过"; }
     if [ -d /tmp/openclaw-gitrestore ]; then
-      for src in /root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/ /root/.openclaw/credentials/ /root/.openclaw/identity/; do
+      for src in /root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/; do
         dest="/tmp/openclaw-gitrestore/src${src}"
         if [ -d "$dest" ]; then
           mkdir -p "$src"
@@ -198,7 +198,7 @@ if [ -n "$GITHUB_TOKEN" ]; then
         fi
       done
       # 跳过 openclaw.json 恢复（由启动脚本用环境变量实时生成）
-      for cfg_file in __SKIP_OPENCLAW_JSON__; do
+      for cfg_file in __SKIP__; do
         src_file="/tmp/openclaw-gitrestore/src/root/.openclaw/${cfg_file}"
         if [ -f "$src_file" ]; then
           mkdir -p /root/.openclaw
