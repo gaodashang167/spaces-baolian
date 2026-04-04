@@ -33,76 +33,69 @@ fi
 CLEAN_BASE=$(echo "$OPENAI_API_BASE" | sed "s|/chat/completions||g" | sed "s|/v1/|/v1|g" | sed "s|/v1$|/v1|g")
 
 # 4. 生成配置文件（始终用环境变量重新生成，不从备份恢复）
-cat > /root/.openclaw/openclaw.json <<EOF
-{
-  "models": {
-    "providers": {
-      "nvidia": {
-        "baseUrl": "$CLEAN_BASE",
-        "apiKey": "$OPENAI_API_KEY",
-        "api": "openai-completions",
-        "models": [
-          { "id": "$MODEL", "name": "$MODEL", "contextWindow": 128000 }
-        ]
-      }
-    }
-  },
-  "agents": { "defaults": { "model": { "primary": "nvidia/$MODEL" } } },
-  "commands": {
-    "restart": true
-  },
-  "tools": {
-      "exec": {
-        "ask": "off",
-        "security": "full"
-      }
-    },
-  "gateway": {
-    "mode": "local",
-    "bind": "lan",
-    "port": 7861,
-    "trustedProxies": ["0.0.0.0/0"],
-    "auth": { "mode": "token", "token": "$OPENCLAW_GATEWAY_PASSWORD" },
-    "controlUi": {
-      "enabled": true,
-      "allowInsecureAuth": true,
-      "allowedOrigins": ["*"],
-      "dangerouslyDisableDeviceAuth": true,
-      "dangerouslyAllowHostHeaderOriginFallback": true
-    }
-  }
-EOF
+python3 - <<PYEOF
+import json, os
 
-# TG设置 -- 如设置了TG_BOT_TOKEN则追加channels配置
-if [ -n "$TG_BOT_TOKEN" ]; then
-  # 去掉最后的 }，追加 channels，再重新加上 }
-  sed -i '$ d' /root/.openclaw/openclaw.json
-  cat >> /root/.openclaw/openclaw.json <<TGEOF
-  ,
-  "channels": {
-    "telegram": {
-      "enabled": true,
-      "botToken": "$TG_BOT_TOKEN",
-      "dmPolicy": "pairing",
-TGEOF
-  if [ -n "$TG_API_ROOT" ]; then
-    echo "      \"apiRoot\": \"$TG_API_ROOT\"," >> /root/.openclaw/openclaw.json
-  fi
-  cat >> /root/.openclaw/openclaw.json <<TGEOF
-      "groups": { "*": { "requireMention": true } },
-      "webhookUrl": "https://wocaca-webopenclaw.hf.space/telegram/webhook",
-      "webhookSecret": "$OPENCLAW_GATEWAY_PASSWORD",
-      "webhookPath": "/telegram/webhook",
-      "webhookHost": "0.0.0.0",
-      "webhookPort": 8787
+clean_base       = os.environ.get("CLEAN_BASE", "")
+api_key          = os.environ.get("OPENAI_API_KEY", "")
+model            = os.environ.get("MODEL", "")
+gw_password      = os.environ.get("OPENCLAW_GATEWAY_PASSWORD", "")
+tg_bot_token     = os.environ.get("TG_BOT_TOKEN", "")
+tg_api_root      = os.environ.get("TG_API_ROOT", "")
+
+cfg = {
+    "models": {
+        "providers": {
+            "nvidia": {
+                "baseUrl": clean_base,
+                "apiKey": api_key,
+                "api": "openai-completions",
+                "models": [
+                    {"id": model, "name": model, "contextWindow": 128000}
+                ]
+            }
+        }
+    },
+    "agents": {"defaults": {"model": {"primary": f"nvidia/{model}"}}},
+    "commands": {"restart": True},
+    "tools": {"exec": {"ask": "off", "security": "full"}},
+    "gateway": {
+        "mode": "local",
+        "bind": "lan",
+        "port": 7861,
+        "trustedProxies": ["0.0.0.0/0"],
+        "auth": {"mode": "token", "token": gw_password},
+        "controlUi": {
+            "enabled": True,
+            "allowInsecureAuth": True,
+            "allowedOrigins": ["*"],
+            "dangerouslyDisableDeviceAuth": True,
+            "dangerouslyAllowHostHeaderOriginFallback": True
+        }
     }
-  }
 }
-TGEOF
-else
-  # 没有TG配置，补上最后的 }
-  echo "}" >> /root/.openclaw/openclaw.json
-fi
+
+if tg_bot_token:
+    tg_cfg = {
+        "enabled": True,
+        "botToken": tg_bot_token,
+        "dmPolicy": "pairing",
+        "groups": {"*": {"requireMention": True}},
+        "webhookUrl": "https://wocaca-webopenclaw.hf.space/telegram/webhook",
+        "webhookSecret": gw_password,
+        "webhookPath": "/telegram/webhook",
+        "webhookHost": "0.0.0.0",
+        "webhookPort": 8787
+    }
+    if tg_api_root:
+        tg_cfg["apiRoot"] = tg_api_root
+    cfg["channels"] = {"telegram": tg_cfg}
+
+out = json.dumps(cfg, indent=2, ensure_ascii=False)
+with open("/root/.openclaw/openclaw.json", "w") as f:
+    f.write(out)
+print(">>> openclaw.json generated OK")
+PYEOF
 
 # 创建nginx配置
 cat > /etc/nginx/nginx.conf <<'EOF'
