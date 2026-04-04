@@ -197,8 +197,8 @@ if [ -n "$GITHUB_TOKEN" ]; then
           echo "  📁 恢复: $src"
         fi
       done
-      # 跳过 openclaw.json 恢复（由启动脚本用环境变量实时生成）
-      for cfg_file in __SKIP__; do
+      # 还原配置文件（如果有）
+      for cfg_file in openclaw.json; do
         src_file="/tmp/openclaw-gitrestore/src/root/.openclaw/${cfg_file}"
         if [ -f "$src_file" ]; then
           mkdir -p /root/.openclaw
