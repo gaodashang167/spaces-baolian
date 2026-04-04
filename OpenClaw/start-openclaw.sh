@@ -32,7 +32,7 @@ fi
 # 4. 处理 API 地址
 CLEAN_BASE=$(echo "$OPENAI_API_BASE" | sed "s|/chat/completions||g" | sed "s|/v1/|/v1|g" | sed "s|/v1$|/v1|g")
 
-# 4. 生成配置文件
+# 4. 生成配置文件（始终用环境变量重新生成，不从备份恢复）
 cat > /root/.openclaw/openclaw.json <<EOF
 {
   "models": {
@@ -99,7 +99,10 @@ TGEOF
   }
 }
 TGEOF
-  fi
+else
+  # 没有TG配置，补上最后的 }
+  echo "}" >> /root/.openclaw/openclaw.json
+fi
 
 # 创建nginx配置
 cat > /etc/nginx/nginx.conf <<'EOF'
@@ -133,6 +136,11 @@ http {
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection $connection_upgrade;
             proxy_set_header X-Forwarded-Host $host;
+            # 连接失败时重试，避免启动期间502
+            proxy_connect_timeout 5s;
+            proxy_next_upstream error timeout http_502 http_503;
+            proxy_next_upstream_tries 3;
+            proxy_next_upstream_timeout 15s;
         }
 
         location /coder/ {
@@ -151,7 +159,6 @@ http {
             proxy_read_timeout 1800;  
         }
 
-        
         location /telegram/webhook {
             proxy_pass http://127.0.0.1:8787;
             proxy_http_version 1.1;
@@ -169,12 +176,10 @@ EOF
 
 
 # 6. 执行恢复
-# ── 6a. 从 GitHub 备份仓库恢复 ──────────────────────────────
-# 优先用环境变量 GITHUB_TOKEN，兼容旧的文件方式
+# ── 6a. 从 GitHub 备份仓库恢复（跳过 openclaw.json，始终用环境变量生成的版本）──
 if [ -f "/root/.backup-secrets/github-token" ]; then
   GITHUB_TOKEN=$(cat "/root/.backup-secrets/github-token")
 elif [ -n "$GITHUB_TOKEN" ]; then
-  # 从环境变量写入，保证重启后持久化
   mkdir -p /root/.backup-secrets
   echo -n "$GITHUB_TOKEN" > /root/.backup-secrets/github-token
   chmod 600 /root/.backup-secrets/github-token
@@ -185,7 +190,7 @@ if [ -n "$GITHUB_TOKEN" ]; then
   echo ">>> 检查 GitHub 备份仓库..."
   REMOTE_HEAD=$(git ls-remote --heads "$GITHUB_REPO_URL" main 2>/dev/null)
   if [ -n "$REMOTE_HEAD" ]; then
-    echo ">>> GitHub 仓库有备份，开始恢复..."
+    echo ">>> GitHub 仓库有备份，开始恢复（跳过 openclaw.json）..."
     rm -rf /tmp/openclaw-gitrestore
     git clone --depth 1 "$GITHUB_REPO_URL" /tmp/openclaw-gitrestore 2>&1 || { echo ">>> GitHub clone 失败，跳过"; }
     if [ -d /tmp/openclaw-gitrestore ]; then
@@ -197,15 +202,8 @@ if [ -n "$GITHUB_TOKEN" ]; then
           echo "  📁 恢复: $src"
         fi
       done
-      # 还原配置文件（如果有）
-      for cfg_file in openclaw.json; do
-        src_file="/tmp/openclaw-gitrestore/src/root/.openclaw/${cfg_file}"
-        if [ -f "$src_file" ]; then
-          mkdir -p /root/.openclaw
-          cp -f "$src_file" "/root/.openclaw/${cfg_file}"
-          echo "  📄 恢复: /root/.openclaw/${cfg_file}"
-        fi
-      done
+      # ⚠️ 注意：openclaw.json 不从备份恢复，始终使用环境变量生成的版本
+      echo "  ⏭️  跳过恢复: /root/.openclaw/openclaw.json（使用环境变量生成的版本）"
       rm -rf /tmp/openclaw-gitrestore
       echo ">>> GitHub 恢复完成"
     fi
@@ -221,18 +219,11 @@ echo "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
 
 if [ -n "$RCLONE_CONF" ]; then
   echo "##########同步备份############"
-  # 为了防止不存在目录报错
   rclone mkdir $REMOTE_FOLDER
-  # 使用 rclone ls 命令列出文件夹内容，将输出和错误分别捕获
   OUTPUT=$(rclone ls "$REMOTE_FOLDER" 2>&1)
-  # 获取 rclone 命令的退出状态码
   EXIT_CODE=$?
-  #echo "rclone退出代码:$EXIT_CODE"
-  # 判断退出状态码
   if [ $EXIT_CODE -eq 0 ]; then
-    # rclone 命令成功执行，检查文件夹是否为空
     if [ -z "$OUTPUT" ]; then
-      #为空不处理
       echo "初次安装"
     else
         echo "远程文件夹不为空开始还原"
@@ -265,19 +256,36 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
+# 使用 pm2 启动 openclaw（先启动，再启动 nginx）
+pm2 start "openclaw gateway run --port 7861" --name openclaw
+
+# 等待 openclaw gateway 在 7861 端口就绪，最多等 60 秒
+echo ">>> 等待 openclaw gateway 在 7861 端口就绪..."
+for i in $(seq 1 60); do
+  if curl -sf http://127.0.0.1:7861/ > /dev/null 2>&1 || \
+     curl -sf http://127.0.0.1:7861/health > /dev/null 2>&1; then
+    echo ">>> openclaw gateway 已就绪（${i}s）"
+    break
+  fi
+  # 备用检测：端口是否被监听
+  if ss -tlnp 2>/dev/null | grep -q ':7861 ' || \
+     netstat -tlnp 2>/dev/null | grep -q ':7861 '; then
+    echo ">>> openclaw gateway 端口已监听（${i}s）"
+    break
+  fi
+  if [ $i -eq 60 ]; then
+    echo ">>> WARN: openclaw gateway 60s 内未就绪，继续启动 nginx（可能短暂出现502）"
+  fi
+  sleep 1
+done
+
 # 启动 nginx 前台运行
 nginx -g 'daemon off;' &
-
-# 使用 pm2 启动 openclaw
-pm2 start "openclaw gateway run --port 7861" --name openclaw
 
 echo -e "======================启动code-server服务========================\n"
 export PASSWORD=$OPENCLAW_GATEWAY_PASSWORD
 pm2 start "code-server --bind-addr 0.0.0.0:7862 --port 7862" --name "code-server"
 pm2 startup
 pm2 save
-
-# 使用 pm2 持续运行，保持容器不退出 需要的话开启
-# pm2 logs
 
 tail -f /dev/null
