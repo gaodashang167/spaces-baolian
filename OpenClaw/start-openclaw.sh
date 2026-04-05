@@ -136,6 +136,32 @@ print(">>> openclaw.json generated OK")
 print(f">>> baseUrl={clean_base!r}, model={model!r}")
 PYEOF
 
+# ── 4b. 生成 exec-approvals.json（真正控制 /approve） ────────
+cat > /root/.openclaw/exec-approvals.json <<'APPROVALSEOF'
+{
+  "version": 1,
+  "defaults": {
+    "security": "full",
+    "ask": "off",
+    "askFallback": "full",
+    "autoAllowSkills": true
+  },
+  "agents": {
+    "main": {
+      "security": "full",
+      "ask": "off",
+      "askFallback": "full",
+      "autoAllowSkills": true,
+      "allowlist": []
+    }
+  }
+}
+APPROVALSEOF
+chmod 600 /root/.openclaw/exec-approvals.json
+
+echo ">>> exec-approvals.json generated OK"
+cat /root/.openclaw/exec-approvals.json
+
 # 创建nginx配置
 cat > /etc/nginx/nginx.conf <<'NGINXEOF'
 worker_processes 1;
@@ -327,6 +353,9 @@ echo ">>> 自检：openclaw config 当前值（若命令可用）"
 openclaw config get tools.exec.security || true
 openclaw config get tools.exec.ask || true
 openclaw config get tools.exec.host || true
+
+echo ">>> 自检：exec approvals 文件"
+cat /root/.openclaw/exec-approvals.json || true
 
 echo ">>> 自检：7861 端口监听情况"
 ss -tlnp 2>/dev/null | grep ':7861' || true
