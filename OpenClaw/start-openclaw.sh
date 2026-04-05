@@ -29,12 +29,13 @@ else
     echo ">>> Chromium found: $CHROMIUM_PATH"
 fi
 
-# ── 4. 生成 openclaw.json ────────
+# ── 4. 生成 openclaw.json（始终用环境变量，不从备份恢复）────────
 echo ">>> DEBUG: OPENAI_API_BASE=${OPENAI_API_BASE}"
 echo ">>> DEBUG: MODEL=${MODEL}"
 echo ">>> DEBUG: OPENAI_API_KEY=$([ -n "$OPENAI_API_KEY" ] && echo '(set)' || echo '(EMPTY)')"
 echo ">>> DEBUG: OPENCLAW_GATEWAY_PASSWORD=$([ -n "$OPENCLAW_GATEWAY_PASSWORD" ] && echo '(set)' || echo '(EMPTY)')"
 
+# 处理API地址并export给Python
 CLEAN_BASE=$(echo "$OPENAI_API_BASE" | sed "s|/chat/completions||g" | sed "s|/v1/$|/v1|g" | sed "s|/v1$|/v1|g" | sed "s|/v1/|/v1|g" | sed 's|/$||g')
 export CLEAN_BASE
 export OPENAI_API_KEY
@@ -83,20 +84,9 @@ cfg = {
             }
         }
     },
-    "agents": {
-        "defaults": {
-            "model": {"primary": f"nvidia/{model}"},
-            "sandbox": {"mode": "off"}
-        }
-    },
+    "agents": {"defaults": {"model": {"primary": f"nvidia/{model}"}}},
     "commands": {"restart": True},
-    "tools": {
-        "exec": {
-            "ask": "off",
-            "security": "full",
-            "host": "auto"
-        }
-    },
+    "tools": {"exec": {"ask": "off", "security": "full"}},
     "gateway": {
         "mode": "local",
         "bind": "lan",
@@ -204,6 +194,7 @@ http {
 }
 NGINXEOF
 
+
 # 6. 执行恢复
 if [ -f "/root/.backup-secrets/github-token" ]; then
   GITHUB_TOKEN=$(cat "/root/.backup-secrets/github-token")
@@ -266,10 +257,24 @@ else
     echo "没有检测到Rclone配置信息"
 fi
 
-# 7. 运行 doctor
+# 7. 运行
 openclaw doctor --fix
 
-# 8. 启动 gateway
+# 启动定时备份
+(while true; do
+  sleep 3600
+  echo ">>> Running scheduled GitHub backup..."
+  cd /app && ./sync.sh git-backup >> /tmp/git-backup.log 2>&1
+done) &
+
+nginx -t
+if [ $? -ne 0 ]; then
+  echo "nginx 配置失败"
+  cat /var/log/nginx/error.log
+  exit 1
+fi
+
+# 先启动 openclaw，等端口就绪再启动 nginx
 pm2 start "openclaw gateway run --port 7861" --name openclaw
 
 echo ">>> 等待 openclaw gateway 在 7861 端口就绪..."
@@ -285,44 +290,7 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-# 9. 写入 exec 策略后重启 gateway 使其生效
-echo ">>> 强制写入 exec 审批策略..."
-openclaw config set tools.exec.security full
-openclaw config set tools.exec.ask off
-openclaw config set tools.exec.host auto
-echo ">>> exec 策略写入完成，重启 gateway 使配置生效..."
-pm2 restart openclaw
-
-echo ">>> 等待 gateway 重启就绪..."
-sleep 8
-for i in $(seq 1 30); do
-  if ss -tlnp 2>/dev/null | grep -q ':7861'; then
-    echo ">>> gateway 重启后端口就绪（${i}s）"
-    break
-  fi
-  if [ $i -eq 30 ]; then
-    echo ">>> WARN: gateway 重启后 30s 内未就绪"
-    pm2 logs openclaw --lines 20 --nostream || true
-  fi
-  sleep 1
-done
-echo ">>> gateway 重启完成，策略已生效"
-
-nginx -t
-if [ $? -ne 0 ]; then
-  echo "nginx 配置失败"
-  cat /var/log/nginx/error.log
-  exit 1
-fi
-
 nginx -g 'daemon off;' &
-
-# 启动定时备份
-(while true; do
-  sleep 3600
-  echo ">>> Running scheduled GitHub backup..."
-  cd /app && ./sync.sh git-backup >> /tmp/git-backup.log 2>&1
-done) &
 
 echo "======================启动code-server服务========================"
 export PASSWORD=$OPENCLAW_GATEWAY_PASSWORD
