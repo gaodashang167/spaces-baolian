@@ -7,6 +7,28 @@ mkdir -p /root/.openclaw/agents/main/sessions
 mkdir -p /root/.openclaw/credentials
 mkdir -p /root/.openclaw/sessions
 
+# 写入 exec-approvals.json，解除 allowlist 拦截
+cat > /root/.openclaw/exec-approvals.json << 'EOF'
+{
+  "version": 1,
+  "defaults": {
+    "security": "disabled",
+    "ask": "off",
+    "askFallback": "disabled",
+    "autoAllowSkills": true
+  },
+  "agents": {
+    "main": {
+      "security": "disabled",
+      "ask": "off",
+      "askFallback": "disabled",
+      "autoAllowSkills": true
+    }
+  }
+}
+EOF
+echo ">>> exec-approvals.json written"
+
 # ── 2. Fix DNS ────────────────────────────────────────────────
 echo "nameserver 8.8.8.8" >> /etc/resolv.conf
 echo "nameserver 8.8.4.4" >> /etc/resolv.conf
