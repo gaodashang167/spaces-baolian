@@ -285,12 +285,28 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-# 9. gateway 就绪后用 CLI 强制写入 exec 策略
+# 9. 写入 exec 策略后重启 gateway 使其生效
 echo ">>> 强制写入 exec 审批策略..."
 openclaw config set tools.exec.security full
 openclaw config set tools.exec.ask off
 openclaw config set tools.exec.host auto
-echo ">>> exec 策略写入完成"
+echo ">>> exec 策略写入完成，重启 gateway 使配置生效..."
+pm2 restart openclaw
+
+echo ">>> 等待 gateway 重启就绪..."
+sleep 8
+for i in $(seq 1 30); do
+  if ss -tlnp 2>/dev/null | grep -q ':7861'; then
+    echo ">>> gateway 重启后端口就绪（${i}s）"
+    break
+  fi
+  if [ $i -eq 30 ]; then
+    echo ">>> WARN: gateway 重启后 30s 内未就绪"
+    pm2 logs openclaw --lines 20 --nostream || true
+  fi
+  sleep 1
+done
+echo ">>> gateway 重启完成，策略已生效"
 
 nginx -t
 if [ $? -ne 0 ]; then
