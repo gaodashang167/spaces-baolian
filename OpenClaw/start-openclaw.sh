@@ -29,7 +29,7 @@ else
     echo ">>> Chromium found: $CHROMIUM_PATH"
 fi
 
-# ── 4. 生成 openclaw.json（始终用环境变量，不从备份恢复）────────
+# ── 4. 生成 openclaw.json ────────
 echo ">>> DEBUG: OPENAI_API_BASE=${OPENAI_API_BASE}"
 echo ">>> DEBUG: MODEL=${MODEL}"
 echo ">>> DEBUG: OPENAI_API_KEY=$([ -n "$OPENAI_API_KEY" ] && echo '(set)' || echo '(EMPTY)')"
@@ -86,7 +86,6 @@ cfg = {
     "agents": {
         "defaults": {
             "model": {"primary": f"nvidia/{model}"},
-            # 关闭 sandbox，否则 sandbox 会在 exec 上再加一层审批拦截
             "sandbox": {"mode": "off"}
         }
     },
@@ -95,7 +94,7 @@ cfg = {
         "exec": {
             "ask": "off",
             "security": "full",
-            "host": "gateway"
+            "host": "auto"
         }
     },
     "gateway": {
@@ -270,7 +269,7 @@ fi
 # 7. 运行 doctor
 openclaw doctor --fix
 
-# 8. gateway 启动后立即用 CLI 强制设置 exec 策略（绕过文件被覆盖的 bug）
+# 8. 启动 gateway
 pm2 start "openclaw gateway run --port 7861" --name openclaw
 
 echo ">>> 等待 openclaw gateway 在 7861 端口就绪..."
@@ -286,28 +285,12 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-# gateway 就绪后，用 CLI 直接写入 exec 策略（这是最终有效的方式）
-echo ">>> 用 CLI 强制设置 exec 审批策略..."
-openclaw approvals set --stdin << 'APPROVALS'
-{
-  "version": 1,
-  "defaults": {
-    "security": "full",
-    "ask": "off",
-    "askFallback": "disabled",
-    "autoAllowSkills": true
-  },
-  "agents": {
-    "main": {
-      "security": "full",
-      "ask": "off",
-      "askFallback": "disabled",
-      "autoAllowSkills": true
-    }
-  }
-}
-APPROVALS
-echo ">>> exec 审批策略设置完成"
+# 9. gateway 就绪后用 CLI 强制写入 exec 策略
+echo ">>> 强制写入 exec 审批策略..."
+openclaw config set tools.exec.security full
+openclaw config set tools.exec.ask off
+openclaw config set tools.exec.host auto
+echo ">>> exec 策略写入完成"
 
 nginx -t
 if [ $? -ne 0 ]; then
