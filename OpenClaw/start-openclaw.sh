@@ -308,6 +308,32 @@ for i in $(seq 1 30); do
 done
 echo ">>> gateway 重启完成，策略已生效"
 
+echo ">>> 自检：打印最终 exec 配置与 gateway 状态"
+python3 <<'PYEOF'
+import json
+path = '/root/.openclaw/openclaw.json'
+try:
+    with open(path, 'r', encoding='utf-8') as f:
+        cfg = json.load(f)
+    exec_cfg = ((cfg.get('tools') or {}).get('exec') or {})
+    print('>>> openclaw.json tools.exec =', json.dumps(exec_cfg, ensure_ascii=False))
+    print('>>> openclaw.json gateway.mode =', ((cfg.get('gateway') or {}).get('mode')))
+    print('>>> openclaw.json gateway.auth.mode =', (((cfg.get('gateway') or {}).get('auth') or {}).get('mode')))
+except Exception as e:
+    print('>>> WARN: failed to inspect /root/.openclaw/openclaw.json:', e)
+PYEOF
+
+echo ">>> 自检：openclaw config 当前值（若命令可用）"
+openclaw config get tools.exec.security || true
+openclaw config get tools.exec.ask || true
+openclaw config get tools.exec.host || true
+
+echo ">>> 自检：7861 端口监听情况"
+ss -tlnp 2>/dev/null | grep ':7861' || true
+
+echo ">>> 自检：pm2 openclaw 最近日志"
+pm2 logs openclaw --lines 20 --nostream || true
+
 nginx -t
 if [ $? -ne 0 ]; then
  echo "nginx 配置失败"
