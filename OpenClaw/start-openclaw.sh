@@ -7,28 +7,6 @@ mkdir -p /root/.openclaw/agents/main/sessions
 mkdir -p /root/.openclaw/credentials
 mkdir -p /root/.openclaw/sessions
 
-# 写入 exec-approvals.json（pass 1：最早写入）
-cat > /root/.openclaw/exec-approvals.json << 'EOF'
-{
-  "version": 1,
-  "defaults": {
-    "security": "disabled",
-    "ask": "off",
-    "askFallback": "disabled",
-    "autoAllowSkills": true
-  },
-  "agents": {
-    "main": {
-      "security": "disabled",
-      "ask": "off",
-      "askFallback": "disabled",
-      "autoAllowSkills": true
-    }
-  }
-}
-EOF
-echo ">>> exec-approvals.json written (pass 1)"
-
 # ── 2. Fix DNS ────────────────────────────────────────────────
 echo "nameserver 8.8.8.8" >> /etc/resolv.conf
 echo "nameserver 8.8.4.4" >> /etc/resolv.conf
@@ -57,7 +35,6 @@ echo ">>> DEBUG: MODEL=${MODEL}"
 echo ">>> DEBUG: OPENAI_API_KEY=$([ -n "$OPENAI_API_KEY" ] && echo '(set)' || echo '(EMPTY)')"
 echo ">>> DEBUG: OPENCLAW_GATEWAY_PASSWORD=$([ -n "$OPENCLAW_GATEWAY_PASSWORD" ] && echo '(set)' || echo '(EMPTY)')"
 
-# 处理API地址并export给Python
 CLEAN_BASE=$(echo "$OPENAI_API_BASE" | sed "s|/chat/completions||g" | sed "s|/v1/$|/v1|g" | sed "s|/v1$|/v1|g" | sed "s|/v1/|/v1|g" | sed 's|/$||g')
 export CLEAN_BASE
 export OPENAI_API_KEY
@@ -106,9 +83,21 @@ cfg = {
             }
         }
     },
-    "agents": {"defaults": {"model": {"primary": f"nvidia/{model}"}}},
+    "agents": {
+        "defaults": {
+            "model": {"primary": f"nvidia/{model}"},
+            # 关闭 sandbox，否则 sandbox 会在 exec 上再加一层审批拦截
+            "sandbox": {"mode": "off"}
+        }
+    },
     "commands": {"restart": True},
-    "tools": {"exec": {"ask": "off", "security": "full"}},
+    "tools": {
+        "exec": {
+            "ask": "off",
+            "security": "full",
+            "host": "gateway"
+        }
+    },
     "gateway": {
         "mode": "local",
         "bind": "lan",
@@ -216,7 +205,6 @@ http {
 }
 NGINXEOF
 
-
 # 6. 执行恢复
 if [ -f "/root/.backup-secrets/github-token" ]; then
   GITHUB_TOKEN=$(cat "/root/.backup-secrets/github-token")
@@ -279,68 +267,10 @@ else
     echo "没有检测到Rclone配置信息"
 fi
 
-# ── 7. 写入 exec-approvals.json（pass 2：restore 之后）──
-cat > /root/.openclaw/exec-approvals.json << 'EOF'
-{
-  "version": 1,
-  "defaults": {
-    "security": "disabled",
-    "ask": "off",
-    "askFallback": "disabled",
-    "autoAllowSkills": true
-  },
-  "agents": {
-    "main": {
-      "security": "disabled",
-      "ask": "off",
-      "askFallback": "disabled",
-      "autoAllowSkills": true
-    }
-  }
-}
-EOF
-echo ">>> exec-approvals.json written (pass 2: after restore)"
-
-# 8. 运行
+# 7. 运行 doctor
 openclaw doctor --fix
 
-# ── 写入 exec-approvals.json（pass 3：doctor 之后，最终保障）──
-cat > /root/.openclaw/exec-approvals.json << 'EOF'
-{
-  "version": 1,
-  "defaults": {
-    "security": "disabled",
-    "ask": "off",
-    "askFallback": "disabled",
-    "autoAllowSkills": true
-  },
-  "agents": {
-    "main": {
-      "security": "disabled",
-      "ask": "off",
-      "askFallback": "disabled",
-      "autoAllowSkills": true
-    }
-  }
-}
-EOF
-echo ">>> exec-approvals.json written (pass 3: after doctor)"
-
-# 启动定时备份
-(while true; do
-  sleep 3600
-  echo ">>> Running scheduled GitHub backup..."
-  cd /app && ./sync.sh git-backup >> /tmp/git-backup.log 2>&1
-done) &
-
-nginx -t
-if [ $? -ne 0 ]; then
-  echo "nginx 配置失败"
-  cat /var/log/nginx/error.log
-  exit 1
-fi
-
-# 先启动 openclaw，等端口就绪再启动 nginx
+# 8. gateway 启动后立即用 CLI 强制设置 exec 策略（绕过文件被覆盖的 bug）
 pm2 start "openclaw gateway run --port 7861" --name openclaw
 
 echo ">>> 等待 openclaw gateway 在 7861 端口就绪..."
@@ -356,7 +286,44 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
+# gateway 就绪后，用 CLI 直接写入 exec 策略（这是最终有效的方式）
+echo ">>> 用 CLI 强制设置 exec 审批策略..."
+openclaw approvals set --stdin << 'APPROVALS'
+{
+  "version": 1,
+  "defaults": {
+    "security": "full",
+    "ask": "off",
+    "askFallback": "disabled",
+    "autoAllowSkills": true
+  },
+  "agents": {
+    "main": {
+      "security": "full",
+      "ask": "off",
+      "askFallback": "disabled",
+      "autoAllowSkills": true
+    }
+  }
+}
+APPROVALS
+echo ">>> exec 审批策略设置完成"
+
+nginx -t
+if [ $? -ne 0 ]; then
+  echo "nginx 配置失败"
+  cat /var/log/nginx/error.log
+  exit 1
+fi
+
 nginx -g 'daemon off;' &
+
+# 启动定时备份
+(while true; do
+  sleep 3600
+  echo ">>> Running scheduled GitHub backup..."
+  cd /app && ./sync.sh git-backup >> /tmp/git-backup.log 2>&1
+done) &
 
 echo "======================启动code-server服务========================"
 export PASSWORD=$OPENCLAW_GATEWAY_PASSWORD
