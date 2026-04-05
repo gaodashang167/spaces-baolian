@@ -7,7 +7,7 @@ mkdir -p /root/.openclaw/agents/main/sessions
 mkdir -p /root/.openclaw/credentials
 mkdir -p /root/.openclaw/sessions
 
-# 写入 exec-approvals.json（第一次，防止后续逻辑出错）
+# 写入 exec-approvals.json（pass 1：最早写入）
 cat > /root/.openclaw/exec-approvals.json << 'EOF'
 {
   "version": 1,
@@ -279,7 +279,7 @@ else
     echo "没有检测到Rclone配置信息"
 fi
 
-# ── 7. 强制覆盖 exec-approvals.json（所有 restore 之后，确保不被覆盖）──
+# ── 7. 写入 exec-approvals.json（pass 2：restore 之后）──
 cat > /root/.openclaw/exec-approvals.json << 'EOF'
 {
   "version": 1,
@@ -299,10 +299,32 @@ cat > /root/.openclaw/exec-approvals.json << 'EOF'
   }
 }
 EOF
-echo ">>> exec-approvals.json 强制覆盖完成 (pass 2)"
+echo ">>> exec-approvals.json written (pass 2: after restore)"
 
 # 8. 运行
 openclaw doctor --fix
+
+# ── 写入 exec-approvals.json（pass 3：doctor 之后，最终保障）──
+cat > /root/.openclaw/exec-approvals.json << 'EOF'
+{
+  "version": 1,
+  "defaults": {
+    "security": "disabled",
+    "ask": "off",
+    "askFallback": "disabled",
+    "autoAllowSkills": true
+  },
+  "agents": {
+    "main": {
+      "security": "disabled",
+      "ask": "off",
+      "askFallback": "disabled",
+      "autoAllowSkills": true
+    }
+  }
+}
+EOF
+echo ">>> exec-approvals.json written (pass 3: after doctor)"
 
 # 启动定时备份
 (while true; do
