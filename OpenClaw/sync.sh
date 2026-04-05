@@ -14,7 +14,7 @@
 GITHUB_REPO="https://github.com/gaodashang167/openclaw-backup.git"
 GITHUB_TOKEN_FILE="/root/.backup-secrets/github-token"
 BACKUP_DIR="/tmp/openclaw-gitbackup"
-# 备份 workspace、session 和配置文件
+# 备份 workspace、session 和配置文件（排除 exec-approvals.json）
 BACKUP_FILES="/root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/ /root/.openclaw/openclaw.json /root/.openclaw/credentials/ /root/.openclaw/identity/"
 
 # ---- Rclone 配置（旧模式） ----
@@ -38,7 +38,6 @@ copy_dir_no_git() {
 
 # ---- 工具函数: 敏感信息过滤 ----
 sanitize_tokens() {
-  # 替换所有 ghp_ 开头的 token，防止泄露到备份仓库
   _file="$1"
   if [ -f "$_file" ]; then
     sed -i 's/ghp_[A-Za-z0-9]\{20,\}/[FILTERED_GITHUB_TOKEN]/g' "$_file"
@@ -48,7 +47,6 @@ sanitize_tokens() {
 sanitize_dir_tokens() {
   _dir="$1"
   if [ -d "$_dir" ]; then
-    # 替换所有 ghp_ 开头的 token（包含下划线）
     find "$_dir" -type f 2>/dev/null | while read -r _f; do
       sed -i 's/ghp_[A-Za-z0-9_]\{20,\}/[FILTERED_GITHUB_TOKEN]/g' "$_f" 2>/dev/null
     done
@@ -106,8 +104,11 @@ git_backup() {
     echo "🔒 过滤敏感信息..."
     sanitize_dir_tokens "$BACKUP_DIR/src/root"
 
-    # 添加 .gitignore 排除 token 文件（不应该被备份）
-    echo ".backup-secrets/" > "$BACKUP_DIR/.gitignore"
+    # 添加 .gitignore 排除 token 文件和 exec-approvals.json
+    cat > "$BACKUP_DIR/.gitignore" << 'GITIGNORE'
+.backup-secrets/
+src/root/.openclaw/exec-approvals.json
+GITIGNORE
 
     git add -A
     if git diff --cached --quiet; then
@@ -139,6 +140,10 @@ git_restore() {
     git clone --depth 1 "$REPO_URL" "/tmp/openclaw-gitrestore"
 
     for src in $BACKUP_FILES; do
+        # 跳过 exec-approvals.json
+        case "$src" in
+            *exec-approvals.json) echo "⏭️  跳过还原: $src"; continue ;;
+        esac
         dest="/tmp/openclaw-gitrestore/src${src}"
         if [ -d "$dest" ]; then
             mkdir -p "$src"
@@ -179,7 +184,11 @@ rclone_backup() {
 rclone_restore() {
     echo "=== 开始 rclone 还原 ==="
     for path in $OPENCLAW_PATHS; do
-        if [ -d "$path" ] || [[ "$path" == */ ]]; then
+        # 跳过 exec-approvals.json
+        case "$path" in
+            *exec-approvals.json) echo "⏭️  跳过还原: $path"; continue ;;
+        esac
+        if [ -d "$path" ] || [ "${path%/}" != "$path" ]; then
             mkdir -p "$path"
             rclone sync --checksum --progress --create-empty-src-dirs "$REMOTE_FOLDER/$path" "$path"
         else
