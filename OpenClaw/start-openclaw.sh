@@ -7,7 +7,7 @@ mkdir -p /root/.openclaw/agents/main/sessions
 mkdir -p /root/.openclaw/credentials
 mkdir -p /root/.openclaw/sessions
 
-# 写入 exec-approvals.json，解除 allowlist 拦截
+# 写入 exec-approvals.json（第一次，防止后续逻辑出错）
 cat > /root/.openclaw/exec-approvals.json << 'EOF'
 {
   "version": 1,
@@ -27,7 +27,7 @@ cat > /root/.openclaw/exec-approvals.json << 'EOF'
   }
 }
 EOF
-echo ">>> exec-approvals.json written"
+echo ">>> exec-approvals.json written (pass 1)"
 
 # ── 2. Fix DNS ────────────────────────────────────────────────
 echo "nameserver 8.8.8.8" >> /etc/resolv.conf
@@ -279,7 +279,29 @@ else
     echo "没有检测到Rclone配置信息"
 fi
 
-# 7. 运行
+# ── 7. 强制覆盖 exec-approvals.json（所有 restore 之后，确保不被覆盖）──
+cat > /root/.openclaw/exec-approvals.json << 'EOF'
+{
+  "version": 1,
+  "defaults": {
+    "security": "disabled",
+    "ask": "off",
+    "askFallback": "disabled",
+    "autoAllowSkills": true
+  },
+  "agents": {
+    "main": {
+      "security": "disabled",
+      "ask": "off",
+      "askFallback": "disabled",
+      "autoAllowSkills": true
+    }
+  }
+}
+EOF
+echo ">>> exec-approvals.json 强制覆盖完成 (pass 2)"
+
+# 8. 运行
 openclaw doctor --fix
 
 # 启动定时备份
