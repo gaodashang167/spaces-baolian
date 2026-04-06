@@ -266,50 +266,41 @@ else
     echo "没有检测到Rclone配置信息"
 fi
 
-# 7. 运行 doctor（让它生成带 socket token 的 exec-approvals.json）
+# 7. 运行 doctor
 openclaw doctor --fix
 
-# 8. 关键：doctor 跑完后，读取它生成的 socket 信息，合并我们的策略
-echo ">>> 合并写入 exec-approvals.json（保留 socket，覆盖策略）..."
-python3 << 'PYEOF'
-import json, os
-
-path = '/root/.openclaw/exec-approvals.json'
-try:
-    with open(path, 'r') as f:
-        data = json.load(f)
-    print(">>> 读取到 doctor 生成的文件，保留 socket 字段")
-except Exception as e:
-    print(f">>> 文件不存在或读取失败（{e}），从头创建")
-    data = {"version": 1}
-
-# 保留 socket 字段，强制覆盖策略部分
-data["version"] = 1
-data["defaults"] = {
-    "security": "disabled",
+# 8. 关键：gateway 启动前写入正确的 exec-approvals.json
+#    security 合法值只有 deny | allowlist | full，没有 disabled
+#    同时必须包含 socket 字段，否则 headless 容器里审批守护进程无法工作
+echo ">>> 写入 exec-approvals.json（gateway 启动前）..."
+cat > /root/.openclaw/exec-approvals.json << 'EOF'
+{
+  "version": 1,
+  "socket": {
+    "path": "/root/.openclaw/exec-approvals.sock",
+    "token": ""
+  },
+  "defaults": {
+    "security": "full",
     "ask": "off",
-    "askFallback": "disabled",
-    "autoAllowSkills": True
-}
-data["agents"] = {
+    "askFallback": "full",
+    "autoAllowSkills": true
+  },
+  "agents": {
     "main": {
-        "security": "disabled",
-        "ask": "off",
-        "askFallback": "disabled",
-        "autoAllowSkills": True
+      "security": "full",
+      "ask": "off",
+      "askFallback": "full",
+      "autoAllowSkills": true
     }
+  }
 }
-
-with open(path, 'w') as f:
-    json.dump(data, f, indent=2)
-
-print(">>> exec-approvals.json 合并写入完成：")
-print(json.dumps(data, indent=2))
-PYEOF
-
+EOF
 chmod 600 /root/.openclaw/exec-approvals.json
+echo ">>> exec-approvals.json 写入完成："
+cat /root/.openclaw/exec-approvals.json
 
-# 9. 启动 gateway（此时 exec-approvals.json 已存在且策略正确，gateway 直接读取）
+# 9. 启动 gateway（文件已存在，直接读取）
 pm2 start "openclaw gateway run --port 7861" --name openclaw
 
 echo ">>> 等待 openclaw gateway 就绪..."
@@ -325,9 +316,11 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-# 10. 确认文件内容
+# 10. 确认文件未被覆盖，同时检查 socket 是否创建
 echo ">>> 最终 exec-approvals.json 内容："
 cat /root/.openclaw/exec-approvals.json
+echo ">>> 检查 socket 文件："
+ls -la /root/.openclaw/exec-approvals.sock 2>/dev/null && echo ">>> socket 存在" || echo ">>> WARN: socket 不存在"
 
 nginx -t
 if [ $? -ne 0 ]; then
