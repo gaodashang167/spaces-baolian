@@ -29,12 +29,13 @@ else
     echo ">>> Chromium found: $CHROMIUM_PATH"
 fi
 
-# ── 4. 生成 openclaw.json ────────
+# ── 4. 生成 openclaw.json（始终用环境变量，不从备份恢复）────────
 echo ">>> DEBUG: OPENAI_API_BASE=${OPENAI_API_BASE}"
 echo ">>> DEBUG: MODEL=${MODEL}"
 echo ">>> DEBUG: OPENAI_API_KEY=$([ -n "$OPENAI_API_KEY" ] && echo '(set)' || echo '(EMPTY)')"
 echo ">>> DEBUG: OPENCLAW_GATEWAY_PASSWORD=$([ -n "$OPENCLAW_GATEWAY_PASSWORD" ] && echo '(set)' || echo '(EMPTY)')"
 
+# 处理API地址并export给Python
 CLEAN_BASE=$(echo "$OPENAI_API_BASE" | sed "s|/chat/completions||g" | sed "s|/v1/$|/v1|g" | sed "s|/v1$|/v1|g" | sed "s|/v1/|/v1|g" | sed 's|/$||g')
 export CLEAN_BASE
 export OPENAI_API_KEY
@@ -83,24 +84,9 @@ cfg = {
             }
         }
     },
-    "agents": {
-        "defaults": {
-            "model": {"primary": f"nvidia/{model}"},
-            "sandbox": {"mode": "off"}
-        }
-    },
+    "agents": {"defaults": {"model": {"primary": f"nvidia/{model}"}}},
     "commands": {"restart": True},
-    "tools": {
-        "exec": {
-            "ask": "off",
-            "security": "full",
-            "host": "gateway"
-        },
-        "elevated": {
-            "enabled": True,
-            "allowFrom": ["*"]
-        }
-    },
+    "tools": {"exec": {"ask": "off", "security": "full"}},
     "gateway": {
         "mode": "local",
         "bind": "lan",
@@ -208,6 +194,7 @@ http {
 }
 NGINXEOF
 
+
 # 6. 执行恢复
 if [ -f "/root/.backup-secrets/github-token" ]; then
   GITHUB_TOKEN=$(cat "/root/.backup-secrets/github-token")
@@ -270,59 +257,15 @@ else
     echo "没有检测到Rclone配置信息"
 fi
 
-# 7. 运行 doctor
+# 7. 运行
 openclaw doctor --fix
 
-# 8. gateway 启动前写入 exec-approvals.json
-echo ">>> 写入 exec-approvals.json（gateway 启动前）..."
-cat > /root/.openclaw/exec-approvals.json << 'EOF'
-{
-  "version": 1,
-  "socket": {
-    "path": "/root/.openclaw/exec-approvals.sock",
-    "token": ""
-  },
-  "defaults": {
-    "security": "full",
-    "ask": "off",
-    "askFallback": "full",
-    "autoAllowSkills": true
-  },
-  "agents": {
-    "main": {
-      "security": "full",
-      "ask": "off",
-      "askFallback": "full",
-      "autoAllowSkills": true
-    }
-  }
-}
-EOF
-chmod 600 /root/.openclaw/exec-approvals.json
-echo ">>> exec-approvals.json 写入完成："
-cat /root/.openclaw/exec-approvals.json
-
-# 9. 启动 gateway
-pm2 start "openclaw gateway run --port 7861" --name openclaw
-
-echo ">>> 等待 openclaw gateway 就绪..."
-for i in $(seq 1 60); do
-  if ss -tlnp 2>/dev/null | grep -q ':7861'; then
-    echo ">>> openclaw gateway 端口已监听（${i}s）"
-    break
-  fi
-  if [ $i -eq 60 ]; then
-    echo ">>> WARN: openclaw gateway 60s 内未就绪"
-    pm2 logs openclaw --lines 30 --nostream || true
-  fi
-  sleep 1
-done
-
-# 10. 确认文件未被覆盖，检查 socket
-echo ">>> 最终 exec-approvals.json 内容："
-cat /root/.openclaw/exec-approvals.json
-echo ">>> 检查 socket 文件："
-ls -la /root/.openclaw/exec-approvals.sock 2>/dev/null && echo ">>> socket 存在" || echo ">>> WARN: socket 不存在"
+# 启动定时备份
+(while true; do
+  sleep 3600
+  echo ">>> Running scheduled GitHub backup..."
+  cd /app && ./sync.sh git-backup >> /tmp/git-backup.log 2>&1
+done) &
 
 nginx -t
 if [ $? -ne 0 ]; then
@@ -331,14 +274,23 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-nginx -g 'daemon off;' &
+# 先启动 openclaw，等端口就绪再启动 nginx
+pm2 start "openclaw gateway run --port 7861" --name openclaw
 
-# 启动定时备份
-(while true; do
-  sleep 3600
-  echo ">>> Running scheduled GitHub backup..."
-  cd /app && ./sync.sh git-backup >> /tmp/git-backup.log 2>&1
-done) &
+echo ">>> 等待 openclaw gateway 在 7861 端口就绪..."
+for i in $(seq 1 60); do
+  if ss -tlnp 2>/dev/null | grep -q ':7861'; then
+    echo ">>> openclaw gateway 端口已监听（${i}s）"
+    break
+  fi
+  if [ $i -eq 60 ]; then
+    echo ">>> WARN: openclaw gateway 60s 内未就绪，打印pm2日志："
+    pm2 logs openclaw --lines 30 --nostream || true
+  fi
+  sleep 1
+done
+
+nginx -g 'daemon off;' &
 
 echo "======================启动code-server服务========================"
 export PASSWORD=$OPENCLAW_GATEWAY_PASSWORD
