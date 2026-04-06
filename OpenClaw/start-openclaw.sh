@@ -94,7 +94,11 @@ cfg = {
         "exec": {
             "ask": "off",
             "security": "full",
-            "host": "auto"
+            "host": "gateway"
+        },
+        "elevated": {
+            "enabled": True,
+            "allowFrom": ["*"]
         }
     },
     "gateway": {
@@ -269,9 +273,7 @@ fi
 # 7. 运行 doctor
 openclaw doctor --fix
 
-# 8. 关键：gateway 启动前写入正确的 exec-approvals.json
-#    security 合法值只有 deny | allowlist | full，没有 disabled
-#    同时必须包含 socket 字段，否则 headless 容器里审批守护进程无法工作
+# 8. gateway 启动前写入 exec-approvals.json
 echo ">>> 写入 exec-approvals.json（gateway 启动前）..."
 cat > /root/.openclaw/exec-approvals.json << 'EOF'
 {
@@ -300,7 +302,7 @@ chmod 600 /root/.openclaw/exec-approvals.json
 echo ">>> exec-approvals.json 写入完成："
 cat /root/.openclaw/exec-approvals.json
 
-# 9. 启动 gateway（文件已存在，直接读取）
+# 9. 启动 gateway
 pm2 start "openclaw gateway run --port 7861" --name openclaw
 
 echo ">>> 等待 openclaw gateway 就绪..."
@@ -316,7 +318,7 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-# 10. 确认文件未被覆盖，同时检查 socket 是否创建
+# 10. 确认文件未被覆盖，检查 socket
 echo ">>> 最终 exec-approvals.json 内容："
 cat /root/.openclaw/exec-approvals.json
 echo ">>> 检查 socket 文件："
