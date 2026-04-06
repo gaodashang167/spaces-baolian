@@ -15,7 +15,7 @@ RUN curl -fsSL https://code-server.dev/install.sh | sh
 RUN rclone config -h
 
 # 3. 安装 OpenClaw
-RUN npm install -g pm2 openclaw@2026.3.8 --unsafe-perm 
+RUN npm install -g pm2 openclaw@2026.3.12 --unsafe-perm 
 
 # 4. 设置工作目录并拷贝脚本
 WORKDIR /app
