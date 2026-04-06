@@ -266,36 +266,50 @@ else
     echo "没有检测到Rclone配置信息"
 fi
 
-# 7. 运行 doctor
+# 7. 运行 doctor（让它生成带 socket token 的 exec-approvals.json）
 openclaw doctor --fix
 
-# 8. 关键：gateway 启动之前写入 exec-approvals.json
-#    gateway 启动时发现文件已存在则直接读取，不会覆盖
-echo ">>> 写入 exec-approvals.json（gateway 启动前）..."
-cat > /root/.openclaw/exec-approvals.json << 'EOF'
-{
-  "version": 1,
-  "defaults": {
+# 8. 关键：doctor 跑完后，读取它生成的 socket 信息，合并我们的策略
+echo ">>> 合并写入 exec-approvals.json（保留 socket，覆盖策略）..."
+python3 << 'PYEOF'
+import json, os
+
+path = '/root/.openclaw/exec-approvals.json'
+try:
+    with open(path, 'r') as f:
+        data = json.load(f)
+    print(">>> 读取到 doctor 生成的文件，保留 socket 字段")
+except Exception as e:
+    print(f">>> 文件不存在或读取失败（{e}），从头创建")
+    data = {"version": 1}
+
+# 保留 socket 字段，强制覆盖策略部分
+data["version"] = 1
+data["defaults"] = {
     "security": "disabled",
     "ask": "off",
     "askFallback": "disabled",
-    "autoAllowSkills": true
-  },
-  "agents": {
-    "main": {
-      "security": "disabled",
-      "ask": "off",
-      "askFallback": "disabled",
-      "autoAllowSkills": true
-    }
-  }
+    "autoAllowSkills": True
 }
-EOF
-chmod 600 /root/.openclaw/exec-approvals.json
-echo ">>> exec-approvals.json 写入完成："
-cat /root/.openclaw/exec-approvals.json
+data["agents"] = {
+    "main": {
+        "security": "disabled",
+        "ask": "off",
+        "askFallback": "disabled",
+        "autoAllowSkills": True
+    }
+}
 
-# 9. 启动 gateway（此时 exec-approvals.json 已存在，gateway 直接读取不覆盖）
+with open(path, 'w') as f:
+    json.dump(data, f, indent=2)
+
+print(">>> exec-approvals.json 合并写入完成：")
+print(json.dumps(data, indent=2))
+PYEOF
+
+chmod 600 /root/.openclaw/exec-approvals.json
+
+# 9. 启动 gateway（此时 exec-approvals.json 已存在且策略正确，gateway 直接读取）
 pm2 start "openclaw gateway run --port 7861" --name openclaw
 
 echo ">>> 等待 openclaw gateway 就绪..."
@@ -311,8 +325,8 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-# 10. 确认文件没有被覆盖
-echo ">>> 确认 exec-approvals.json 未被覆盖："
+# 10. 确认文件内容
+echo ">>> 最终 exec-approvals.json 内容："
 cat /root/.openclaw/exec-approvals.json
 
 nginx -t
