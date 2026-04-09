@@ -74,6 +74,27 @@ if errors:
         print(f"    - {e}")
     sys.exit(1)
 
+models = []
+if image_model == model:
+    models.append({
+        "id": model,
+        "name": model,
+        "contextWindow": 128000,
+        "input": ["text", "image"]
+    })
+else:
+    models.append({
+        "id": model,
+        "name": model,
+        "contextWindow": 128000
+    })
+    models.append({
+        "id": image_model,
+        "name": image_model,
+        "contextWindow": 128000,
+        "input": ["text", "image"]
+    })
+
 cfg = {
     "models": {
         "providers": {
@@ -81,10 +102,7 @@ cfg = {
                 "baseUrl": clean_base,
                 "apiKey": api_key,
                 "api": "openai-completions",
-                "models": [
-                    {"id": model, "name": model, "contextWindow": 128000},
-                    {"id": image_model, "name": image_model, "contextWindow": 128000}
-                ]
+                "models": models
             }
         }
     },
