@@ -12,7 +12,42 @@ echo "nameserver 8.8.8.8" >> /etc/resolv.conf
 echo "nameserver 8.8.4.4" >> /etc/resolv.conf
 echo ">>> DNS fixed."
 
-# ── 3. Chromium ───────────────────────────────────────────────
+# ── 3. Ollama / embeddings ────────────────────────────────────
+echo ">>> Ensuring Ollama prerequisites..."
+apt-get update
+apt-get install -y zstd
+
+if ! command -v ollama >/dev/null 2>&1; then
+    echo ">>> Installing Ollama..."
+    curl -fsSL https://ollama.com/install.sh | sh
+else
+    echo ">>> Ollama already installed: $(command -v ollama)"
+fi
+
+echo ">>> Starting Ollama service..."
+pkill -x ollama >/dev/null 2>&1 || true
+nohup ollama serve >/tmp/ollama.log 2>&1 &
+
+for i in $(seq 1 60); do
+    if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+        echo ">>> Ollama API ready (${i}s)"
+        break
+    fi
+    if [ "$i" -eq 60 ]; then
+        echo ">>> WARN: Ollama API did not become ready within 60s"
+        tail -n 50 /tmp/ollama.log 2>/dev/null || true
+    fi
+    sleep 1
+done
+
+if ! curl -fsS http://127.0.0.1:11434/api/tags | grep -q '"nomic-embed-text'; then
+    echo ">>> Pulling Ollama embedding model: nomic-embed-text"
+    ollama pull nomic-embed-text
+else
+    echo ">>> Ollama embedding model already present: nomic-embed-text"
+fi
+
+# ── 4. Chromium ───────────────────────────────────────────────
 export PLAYWRIGHT_BROWSERS_PATH=/root/.openclaw/browsers
 CHROMIUM_PATH=$(find /root/.openclaw/browsers -name "chrome" -type f 2>/dev/null | head -1)
 
