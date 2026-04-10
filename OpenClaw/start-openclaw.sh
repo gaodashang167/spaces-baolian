@@ -106,7 +106,8 @@ cfg = {
             },
             "ollama": {
                 "baseUrl": "http://127.0.0.1:11434",
-                "api": "ollama"
+                "api": "ollama",
+                "models": []  # FIX: 新版要求此字段为数组，否则报 Invalid input: expected array
             }
         }
     },
@@ -158,9 +159,9 @@ if tg_bot_token:
         "webhookPath": "/telegram/webhook",
         "webhookHost": "0.0.0.0",
         "webhookPort": 8787
+        # FIX: 移除 apiRoot 字段，新版 openclaw 不再支持该字段（会报 Unrecognized key）
+        # 如需自定义 Telegram API 地址，请通过环境变量或其他方式配置
     }
-    if tg_api_root:
-        tg_cfg["apiRoot"] = tg_api_root
     cfg["channels"] = {"telegram": tg_cfg}
 
 out = json.dumps(cfg, indent=2, ensure_ascii=False)
