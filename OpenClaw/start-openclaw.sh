@@ -98,22 +98,39 @@ else:
 cfg = {
     "models": {
         "providers": {
-            "nvidia": {
+            "openai": {
                 "baseUrl": clean_base,
                 "apiKey": api_key,
                 "api": "openai-completions",
                 "models": models
+            },
+            "ollama": {
+                "baseUrl": "http://127.0.0.1:11434",
+                "api": "ollama"
             }
         }
     },
     "agents": {
         "defaults": {
-            "model": {"primary": f"nvidia/{model}"},
-            "imageModel": f"nvidia/{image_model}"
+            "model": {"primary": f"openai/{model}"},
+            "imageModel": f"openai/{image_model}",
+            "memorySearch": {
+                "provider": "ollama",
+                "model": "nomic-embed-text",
+                "fallback": "none"
+            }
         }
     },
-    "commands": {"restart": True},
-    "tools": {"exec": {"ask": "off", "security": "full"}},
+    "commands": {"restart": True, "bash": True},
+    "tools": {
+        "exec": {"ask": "off", "security": "full"},
+        "elevated": {
+            "enabled": True,
+            "allowFrom": {
+                "webchat": ["*"]
+            }
+        }
+    },
     "gateway": {
         "mode": "local",
         "bind": "lan",
