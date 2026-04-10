@@ -169,9 +169,9 @@ cfg = {
     },
     "gateway": {
         "mode": "local",
-        "bind": "lan",
+        "bind": "loopback",
         "port": 7861,
-        "trustedProxies": ["0.0.0.0/0"],
+        "trustedProxies": ["127.0.0.1", "::1"],
         "auth": {"mode": "token", "token": gw_password},
         "controlUi": {
             "enabled": True,
@@ -231,7 +231,7 @@ http {
             proxy_pass http://127.0.0.1:7861/;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto $scheme;
             proxy_set_header X-Forwarded-Prefix /openclaw/;
             proxy_http_version 1.1;
