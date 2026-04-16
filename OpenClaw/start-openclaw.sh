@@ -293,7 +293,7 @@ if [ -n "$GITHUB_TOKEN" ]; then
     rm -rf /tmp/openclaw-gitrestore
     git clone --depth 1 "$GITHUB_REPO_URL" /tmp/openclaw-gitrestore 2>&1 || { echo ">>> GitHub clone 失败，跳过"; }
     if [ -d /tmp/openclaw-gitrestore ]; then
-      for src in /root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/ /root/.openclaw/credentials/ /root/.openclaw/identity/; do
+      for src in /root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/ /root/.openclaw/credentials/ /root/.openclaw/identity/ /root/.openclaw/devices/; do
         dest="/tmp/openclaw-gitrestore/src${src}"
         if [ -d "$dest" ]; then
           mkdir -p "$src"
