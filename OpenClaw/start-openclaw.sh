@@ -6,6 +6,7 @@ set -e
 mkdir -p /root/.openclaw/agents/main/sessions
 mkdir -p /root/.openclaw/credentials
 mkdir -p /root/.openclaw/sessions
+mkdir -p /root/.openclaw/memory
 
 # ── 2. Fix DNS ────────────────────────────────────────────────
 echo "nameserver 8.8.8.8" >> /etc/resolv.conf
@@ -293,7 +294,7 @@ if [ -n "$GITHUB_TOKEN" ]; then
     rm -rf /tmp/openclaw-gitrestore
     git clone --depth 1 "$GITHUB_REPO_URL" /tmp/openclaw-gitrestore 2>&1 || { echo ">>> GitHub clone 失败，跳过"; }
     if [ -d /tmp/openclaw-gitrestore ]; then
-      for src in /root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/ /root/.openclaw/credentials/ /root/.openclaw/identity/ /root/.openclaw/devices/; do
+      for src in /root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/ /root/.openclaw/credentials/ /root/.openclaw/identity/ /root/.openclaw/devices/ /root/.openclaw/memory/; do
         dest="/tmp/openclaw-gitrestore/src${src}"
         if [ -d "$dest" ]; then
           mkdir -p "$src"
@@ -369,6 +370,45 @@ for i in $(seq 1 60); do
   fi
   sleep 1
 done
+
+ensure_memory_index() {
+  echo ">>> 检查 memory 索引状态..."
+  STATUS_JSON=$(openclaw memory status --json 2>/dev/null || true)
+  if [ -z "$STATUS_JSON" ]; then
+    echo ">>> WARN: 无法读取 memory status，尝试强制重建"
+    timeout 600 openclaw memory index --force >> /tmp/memory-index.log 2>&1 || echo ">>> WARN: memory 强制重建失败，请查看 /tmp/memory-index.log"
+    return
+  fi
+
+  export STATUS_JSON
+  NEED_REINDEX=$(python3 <<'PY'
+import json, os
+raw = os.environ.get("STATUS_JSON", "")
+try:
+    data = json.loads(raw)
+except Exception:
+    print("yes")
+    raise SystemExit
+
+dirty = bool(data.get("dirty"))
+indexed = data.get("indexedFiles")
+total = data.get("totalFiles")
+chunks = data.get("chunkCount")
+
+need = dirty or indexed in (None, 0) or chunks in (None, 0) or (total not in (None, 0) and indexed != total)
+print("yes" if need else "no")
+PY
+)
+
+  if [ "$NEED_REINDEX" = "yes" ]; then
+    echo ">>> Memory 索引缺失或脏，开始强制重建..."
+    timeout 600 openclaw memory index --force >> /tmp/memory-index.log 2>&1 || echo ">>> WARN: memory 强制重建失败，请查看 /tmp/memory-index.log"
+  else
+    echo ">>> Memory 索引已就绪，跳过重建"
+  fi
+}
+
+ensure_memory_index
 
 nginx -g 'daemon off;' &
 
