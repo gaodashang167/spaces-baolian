@@ -1,90 +1,196 @@
 #!/bin/bash
 
-set -e
+set -Eeuo pipefail
 
-# 1. 补全目录
-mkdir -p /root/.openclaw/agents/main/sessions
-mkdir -p /root/.openclaw/credentials
-mkdir -p /root/.openclaw/sessions
-mkdir -p /root/.openclaw/memory
+APP_DIR="/app"
+OPENCLAW_DIR="/root/.openclaw"
+OPENCLAW_JSON="${OPENCLAW_DIR}/openclaw.json"
+OLLAMA_LOG="/tmp/ollama.log"
+MEMORY_INDEX_LOG="/tmp/memory-index.log"
+GIT_BACKUP_LOG="/tmp/git-backup.log"
 
-# ── 2. Fix DNS ────────────────────────────────────────────────
-echo "nameserver 8.8.8.8" >> /etc/resolv.conf
-echo "nameserver 8.8.4.4" >> /etc/resolv.conf
-echo ">>> DNS fixed."
+log() {
+  echo ">>> $*"
+}
 
-# ── 3. Ollama / embeddings ────────────────────────────────────
-echo ">>> Ensuring Ollama prerequisites..."
-apt-get update
-apt-get install -y zstd
+warn() {
+  echo ">>> WARN: $*" >&2
+}
 
-if ! command -v ollama >/dev/null 2>&1; then
-    echo ">>> Installing Ollama..."
-    curl -fsSL https://ollama.com/install.sh | sh
-else
-    echo ">>> Ollama already installed: $(command -v ollama)"
-fi
+err() {
+  echo ">>> ERROR: $*" >&2
+}
 
-echo ">>> Starting Ollama service..."
-pkill -x ollama >/dev/null 2>&1 || true
-nohup ollama serve >/tmp/ollama.log 2>&1 &
+cleanup_resolv() {
+  if ! grep -q '^nameserver 8\.8\.8\.8$' /etc/resolv.conf 2>/dev/null; then
+    echo "nameserver 8.8.8.8" >> /etc/resolv.conf || true
+  fi
+  if ! grep -q '^nameserver 8\.8\.4\.4$' /etc/resolv.conf 2>/dev/null; then
+    echo "nameserver 8.8.4.4" >> /etc/resolv.conf || true
+  fi
+}
 
-for i in $(seq 1 60); do
-    if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
-        echo ">>> Ollama API ready (${i}s)"
-        break
+retry() {
+  local attempts="$1"
+  shift
+  local n=1
+  until "$@"; do
+    if [ "$n" -ge "$attempts" ]; then
+      return 1
     fi
-    if [ "$i" -eq 60 ]; then
-        echo ">>> WARN: Ollama API did not become ready within 60s"
-        tail -n 50 /tmp/ollama.log 2>/dev/null || true
+    warn "命令失败，第 ${n}/${attempts} 次，重试中：$*"
+    n=$((n + 1))
+    sleep 3
+  done
+}
+
+ensure_dirs() {
+  mkdir -p \
+    "${OPENCLAW_DIR}/agents/main/sessions" \
+    "${OPENCLAW_DIR}/credentials" \
+    "${OPENCLAW_DIR}/sessions" \
+    "${OPENCLAW_DIR}/memory" \
+    "${OPENCLAW_DIR}/workspace" \
+    "${OPENCLAW_DIR}/identity" \
+    "${OPENCLAW_DIR}/devices" \
+    /root/.backup-secrets \
+    /root/.config/rclone
+}
+
+install_system_packages() {
+  log "Fix DNS..."
+  cleanup_resolv
+  log "DNS fixed."
+
+  log "Installing base packages..."
+  export DEBIAN_FRONTEND=noninteractive
+  retry 3 apt-get update
+  retry 3 apt-get install -y --no-install-recommends \
+    zstd curl ca-certificates git nginx jq procps iproute2 python3
+}
+
+install_ollama() {
+  log "Ensuring Ollama prerequisites..."
+
+  if command -v ollama >/dev/null 2>&1; then
+    log "Ollama already installed: $(command -v ollama)"
+    return 0
+  fi
+
+  log "Installing Ollama..."
+  local tmp_script="/tmp/ollama-install.sh"
+
+  if retry 5 curl -fL --retry 5 --retry-delay 3 --connect-timeout 20 \
+      https://ollama.com/install.sh -o "$tmp_script"; then
+    chmod +x "$tmp_script"
+    if bash "$tmp_script"; then
+      log "Ollama install OK"
+      return 0
+    fi
+  fi
+
+  warn "Ollama install script failed. 将继续流程，但 embedding / memory 可能不可用。"
+  return 1
+}
+
+start_ollama() {
+  if ! command -v ollama >/dev/null 2>&1; then
+    warn "未检测到 ollama，跳过启动"
+    return 1
+  fi
+
+  log "Starting Ollama service..."
+  pkill -x ollama >/dev/null 2>&1 || true
+  nohup ollama serve >"${OLLAMA_LOG}" 2>&1 &
+
+  for i in $(seq 1 60); do
+    if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+      log "Ollama API ready (${i}s)"
+      return 0
     fi
     sleep 1
-done
+  done
 
-if ! curl -fsS http://127.0.0.1:11434/api/tags | grep -q '"nomic-embed-text'; then
-    echo ">>> Pulling Ollama embedding model: nomic-embed-text"
-    ollama pull nomic-embed-text
-else
-    echo ">>> Ollama embedding model already present: nomic-embed-text"
-fi
+  warn "Ollama API did not become ready within 60s"
+  tail -n 50 "${OLLAMA_LOG}" 2>/dev/null || true
+  return 1
+}
 
-# ── 4. Chromium ───────────────────────────────────────────────
-export PLAYWRIGHT_BROWSERS_PATH=/root/.openclaw/browsers
-CHROMIUM_PATH=$(find /root/.openclaw/browsers -name "chrome" -type f 2>/dev/null | head -1)
+ensure_embedding_model() {
+  if ! command -v ollama >/dev/null 2>&1; then
+    warn "ollama 不存在，跳过 embedding model 拉取"
+    return 1
+  fi
 
-if [ -z "$CHROMIUM_PATH" ]; then
-    echo ">>> Installing Chromium..."
-    OPENCLAW_NM=$(npm root -g 2>/dev/null)/openclaw/node_modules/playwright-core/cli.js
-    if timeout 180 node "$OPENCLAW_NM" install chromium; then
-        echo ">>> Chromium OK"
+  if ! curl -fsS http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+    warn "Ollama API 未就绪，跳过 embedding model 拉取"
+    return 1
+  fi
+
+  if curl -fsS http://127.0.0.1:11434/api/tags | grep -q '"nomic-embed-text"'; then
+    log "Ollama embedding model already present: nomic-embed-text"
+    return 0
+  fi
+
+  log "Pulling Ollama embedding model: nomic-embed-text"
+  if ! retry 3 ollama pull nomic-embed-text; then
+    warn "拉取 nomic-embed-text 失败，memory embedding 可能不可用"
+    return 1
+  fi
+}
+
+install_chromium() {
+  export PLAYWRIGHT_BROWSERS_PATH=/root/.openclaw/browsers
+  local chromium_path
+  chromium_path=$(find /root/.openclaw/browsers -name "chrome" -type f 2>/dev/null | head -1 || true)
+
+  if [ -n "${chromium_path:-}" ]; then
+    log "Chromium found: ${chromium_path}"
+    return 0
+  fi
+
+  log "Installing Chromium..."
+  local openclaw_nm
+  openclaw_nm="$(npm root -g 2>/dev/null)/openclaw/node_modules/playwright-core/cli.js"
+
+  if [ -f "$openclaw_nm" ]; then
+    if timeout 180 node "$openclaw_nm" install chromium; then
+      log "Chromium OK"
     else
-        echo ">>> WARN: Chromium install failed"
+      warn "Chromium install failed"
     fi
-    CHROMIUM_PATH=$(find /root/.openclaw/browsers -name "chrome" -type f 2>/dev/null | head -1)
-else
-    echo ">>> Chromium found: $CHROMIUM_PATH"
-fi
+  else
+    warn "未找到 playwright cli: $openclaw_nm"
+  fi
+}
 
-# ── 4. 生成 openclaw.json（始终用环境变量，不从备份恢复）────────
-echo ">>> DEBUG: OPENAI_API_BASE=${OPENAI_API_BASE}"
-echo ">>> DEBUG: MODEL=${MODEL}"
-echo ">>> DEBUG: OPENAI_API_KEY=$([ -n "$OPENAI_API_KEY" ] && echo '(set)' || echo '(EMPTY)')"
-echo ">>> DEBUG: IMAGE_MODEL=${IMAGE_MODEL}"
-echo ">>> DEBUG: OPENCLAW_GATEWAY_PASSWORD=$([ -n "$OPENCLAW_GATEWAY_PASSWORD" ] && echo '(set)' || echo '(EMPTY)')"
+generate_openclaw_json() {
+  log "Generating openclaw.json..."
 
-# 处理API地址并export给Python
-CLEAN_BASE=$(echo "$OPENAI_API_BASE" | sed "s|/chat/completions||g" | sed "s|/v1/$|/v1|g" | sed "s|/v1$|/v1|g" | sed "s|/v1/|/v1|g" | sed 's|/$||g')
-export CLEAN_BASE
-export OPENAI_API_KEY
-export MODEL
-export IMAGE_MODEL
-export OPENCLAW_GATEWAY_PASSWORD
-export TG_BOT_TOKEN
-export TG_API_ROOT
+  echo ">>> DEBUG: OPENAI_API_BASE=${OPENAI_API_BASE:-}"
+  echo ">>> DEBUG: MODEL=${MODEL:-}"
+  echo ">>> DEBUG: OPENAI_API_KEY=$([ -n "${OPENAI_API_KEY:-}" ] && echo '(set)' || echo '(EMPTY)')"
+  echo ">>> DEBUG: IMAGE_MODEL=${IMAGE_MODEL:-}"
+  echo ">>> DEBUG: OPENCLAW_GATEWAY_PASSWORD=$([ -n "${OPENCLAW_GATEWAY_PASSWORD:-}" ] && echo '(set)' || echo '(EMPTY)')"
 
-echo ">>> DEBUG: CLEAN_BASE=${CLEAN_BASE}"
+  CLEAN_BASE="$(echo "${OPENAI_API_BASE:-}" \
+    | sed 's|/chat/completions||g' \
+    | sed 's|/v1/$|/v1|g' \
+    | sed 's|/v1$|/v1|g' \
+    | sed 's|/v1/|/v1|g' \
+    | sed 's|/$||g')"
 
-python3 <<'PYEOF'
+  export CLEAN_BASE
+  export OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+  export MODEL="${MODEL:-}"
+  export IMAGE_MODEL="${IMAGE_MODEL:-}"
+  export OPENCLAW_GATEWAY_PASSWORD="${OPENCLAW_GATEWAY_PASSWORD:-}"
+  export TG_BOT_TOKEN="${TG_BOT_TOKEN:-}"
+  export TG_API_ROOT="${TG_API_ROOT:-}"
+
+  echo ">>> DEBUG: CLEAN_BASE=${CLEAN_BASE}"
+
+  python3 <<'PYEOF'
 import json, os, sys
 
 clean_base   = os.environ.get("CLEAN_BASE", "")
@@ -93,7 +199,6 @@ model        = os.environ.get("MODEL", "")
 image_model  = os.environ.get("IMAGE_MODEL", "") or model
 gw_password  = os.environ.get("OPENCLAW_GATEWAY_PASSWORD", "")
 tg_bot_token = os.environ.get("TG_BOT_TOKEN", "")
-tg_api_root  = os.environ.get("TG_API_ROOT", "")
 
 errors = []
 if not clean_base:
@@ -104,6 +209,7 @@ if not model:
     errors.append("MODEL is empty")
 if not gw_password:
     errors.append("OPENCLAW_GATEWAY_PASSWORD is empty")
+
 if errors:
     print(">>> ERROR: Missing required env vars:")
     for e in errors:
@@ -143,7 +249,7 @@ cfg = {
             "ollama": {
                 "baseUrl": "http://127.0.0.1:11434",
                 "api": "ollama",
-                "models": []  # FIX: 新版要求此字段为数组，否则报 Invalid input: expected array
+                "models": []
             }
         }
     },
@@ -195,39 +301,42 @@ if tg_bot_token:
         "webhookPath": "/telegram/webhook",
         "webhookHost": "0.0.0.0",
         "webhookPort": 8787
-        # FIX: 移除 apiRoot 字段，新版 openclaw 不再支持该字段（会报 Unrecognized key）
-        # 如需自定义 Telegram API 地址，请通过环境变量或其他方式配置
     }
     cfg["channels"] = {"telegram": tg_cfg}
 
 out = json.dumps(cfg, indent=2, ensure_ascii=False)
-with open("/root/.openclaw/openclaw.json", "w") as f:
+with open("/root/.openclaw/openclaw.json", "w", encoding="utf-8") as f:
     f.write(out)
+
 print(">>> openclaw.json generated OK")
 print(f">>> baseUrl={clean_base!r}, model={model!r}, image_model={image_model!r}")
 PYEOF
+}
 
-# 创建nginx配置
-cat > /etc/nginx/nginx.conf <<'NGINXEOF'
+write_nginx_conf() {
+  log "Writing nginx config..."
+
+  cat > /etc/nginx/nginx.conf <<'NGINXEOF'
 worker_processes 1;
+
 events {
     worker_connections 1024;
 }
 
 http {
-   upstream codeServer {
-      server 0.0.0.0:7862;
+    upstream codeServer {
+        server 0.0.0.0:7862;
     }
-    
+
     map $http_upgrade $connection_upgrade {
-      default keep-alive;
-      'websocket' upgrade;
+        default keep-alive;
+        websocket upgrade;
     }
-    
+
     server {
         listen 7860;
         server_name _;
-        
+
         location / {
             proxy_pass http://127.0.0.1:7861/;
             proxy_set_header Host $host;
@@ -258,7 +367,7 @@ http {
             proxy_redirect default;
             proxy_connect_timeout 1800;
             proxy_send_timeout 1800;
-            proxy_read_timeout 1800;  
+            proxy_read_timeout 1800;
         }
 
         location /telegram/webhook {
@@ -274,148 +383,272 @@ http {
     }
 }
 NGINXEOF
+}
 
-
-# 6. 执行恢复
-if [ -f "/root/.backup-secrets/github-token" ]; then
-  GITHUB_TOKEN=$(cat "/root/.backup-secrets/github-token")
-elif [ -n "$GITHUB_TOKEN" ]; then
-  mkdir -p /root/.backup-secrets
-  echo -n "$GITHUB_TOKEN" > /root/.backup-secrets/github-token
-  chmod 600 /root/.backup-secrets/github-token
-fi
-
-if [ -n "$GITHUB_TOKEN" ]; then
-  GITHUB_REPO_URL="https://gaodashang167:${GITHUB_TOKEN}@github.com/gaodashang167/openclaw-backup.git"
-  echo ">>> 检查 GitHub 备份仓库..."
-  REMOTE_HEAD=$(git ls-remote --heads "$GITHUB_REPO_URL" main 2>/dev/null)
-  if [ -n "$REMOTE_HEAD" ]; then
-    echo ">>> GitHub 仓库有备份，开始恢复（跳过 openclaw.json）..."
-    rm -rf /tmp/openclaw-gitrestore
-    git clone --depth 1 "$GITHUB_REPO_URL" /tmp/openclaw-gitrestore 2>&1 || { echo ">>> GitHub clone 失败，跳过"; }
-    if [ -d /tmp/openclaw-gitrestore ]; then
-      for src in /root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/ /root/.openclaw/credentials/ /root/.openclaw/identity/ /root/.openclaw/devices/ /root/.openclaw/memory/; do
-        dest="/tmp/openclaw-gitrestore/src${src}"
-        if [ -d "$dest" ]; then
-          mkdir -p "$src"
-          tar cf - -C "$dest" --exclude='.git' . 2>/dev/null | tar xf - -C "$src" --no-same-owner 2>/dev/null || cp -rf "${dest}/" "${src}/"
-          echo "  📁 恢复: $src"
-        fi
-      done
-      echo "  ⏭️  跳过恢复: /root/.openclaw/openclaw.json（使用环境变量生成的版本）"
-      rm -rf /tmp/openclaw-gitrestore
-      echo ">>> GitHub 恢复完成"
-    fi
-  else
-    echo ">>> GitHub 仓库无备份记录，跳过恢复"
+restore_from_github() {
+  if [ -f "/root/.backup-secrets/github-token" ]; then
+    GITHUB_TOKEN="$(cat "/root/.backup-secrets/github-token")"
+  elif [ -n "${GITHUB_TOKEN:-}" ]; then
+    echo -n "$GITHUB_TOKEN" > /root/.backup-secrets/github-token
+    chmod 600 /root/.backup-secrets/github-token
   fi
-else
-  echo ">>> 未配置 GitHub 备份，跳过恢复"
-fi
 
-echo "======================写入rclone配置========================"
-echo "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+  if [ -z "${GITHUB_TOKEN:-}" ]; then
+    log "未配置 GitHub 备份，跳过恢复"
+    return 0
+  fi
 
-if [ -n "$RCLONE_CONF" ]; then
-  echo "##########同步备份############"
-  rclone mkdir $REMOTE_FOLDER
-  OUTPUT=$(rclone ls "$REMOTE_FOLDER" 2>&1)
-  EXIT_CODE=$?
-  if [ $EXIT_CODE -eq 0 ]; then
-    if [ -z "$OUTPUT" ]; then
-      echo "初次安装"
+  local repo_url="https://gaodashang167:${GITHUB_TOKEN}@github.com/gaodashang167/openclaw-backup.git"
+
+  log "检查 GitHub 备份仓库..."
+  local remote_head
+  remote_head="$(git ls-remote --heads "$repo_url" main 2>/dev/null || true)"
+
+  if [ -z "$remote_head" ]; then
+    log "GitHub 仓库无备份记录，跳过恢复"
+    return 0
+  fi
+
+  log "GitHub 仓库有备份，开始恢复（跳过 openclaw.json）..."
+  rm -rf /tmp/openclaw-gitrestore
+
+  if ! git clone --depth 1 "$repo_url" /tmp/openclaw-gitrestore 2>&1; then
+    warn "GitHub clone 失败，跳过恢复"
+    return 1
+  fi
+
+  for src in \
+    /root/.openclaw/workspace/ \
+    /root/.openclaw/sessions/ \
+    /root/.openclaw/agents/main/sessions/ \
+    /root/.openclaw/credentials/ \
+    /root/.openclaw/identity/ \
+    /root/.openclaw/devices/ \
+    /root/.openclaw/memory/; do
+
+    dest="/tmp/openclaw-gitrestore/src${src}"
+    if [ -d "$dest" ]; then
+      mkdir -p "$src"
+      tar cf - -C "$dest" --exclude='.git' . 2>/dev/null | tar xf - -C "$src" --no-same-owner 2>/dev/null || \
+      cp -rf "${dest}/" "${src}/"
+      echo "  📁 恢复: $src"
+    fi
+  done
+
+  echo "  ⏭️  跳过恢复: /root/.openclaw/openclaw.json（使用环境变量生成的版本）"
+  rm -rf /tmp/openclaw-gitrestore
+  log "GitHub 恢复完成"
+}
+
+restore_from_rclone() {
+  mkdir -p ~/.config/rclone
+
+  if [ -n "${RCLONE_CONF:-}" ]; then
+    echo "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+    chmod 600 ~/.config/rclone/rclone.conf
+    log "Rclone 配置已写入"
+  else
+    log "没有检测到 Rclone 配置信息"
+    return 0
+  fi
+
+  if [ -z "${REMOTE_FOLDER:-}" ]; then
+    warn "REMOTE_FOLDER 未设置，跳过 rclone 恢复"
+    return 0
+  fi
+
+  log "同步备份目录..."
+  rclone mkdir "$REMOTE_FOLDER" || true
+
+  local output=""
+  local exit_code=0
+  output="$(rclone ls "$REMOTE_FOLDER" 2>&1)" || exit_code=$?
+
+  if [ "$exit_code" -eq 0 ]; then
+    if [ -z "$output" ]; then
+      log "初次安装，远程目录为空"
     else
-        echo "远程文件夹不为空开始还原"
-        ./sync.sh restore
-        echo "恢复完成."
+      log "远程文件夹不为空，开始还原"
+      (cd "$APP_DIR" && ./sync.sh restore)
+      log "恢复完成"
     fi
-  elif [[ "$OUTPUT" == *"directory not found"* ]]; then
-    echo "错误：文件夹不存在"
+  elif echo "$output" | grep -qi "directory not found"; then
+    warn "Rclone 远程目录不存在"
   else
-    echo "错误：$OUTPUT"
+    warn "Rclone 错误：$output"
   fi
-else
-    echo "没有检测到Rclone配置信息"
-fi
+}
 
-# 7. 运行
-openclaw doctor --fix
-
-# 启动定时备份
-(while true; do
-  sleep 3600
-  echo ">>> Running scheduled GitHub backup..."
-  cd /app && ./sync.sh git-backup >> /tmp/git-backup.log 2>&1
-done) &
-
-nginx -t
-if [ $? -ne 0 ]; then
-  echo "nginx 配置失败"
-  cat /var/log/nginx/error.log
-  exit 1
-fi
-
-# 先启动 openclaw，等端口就绪再启动 nginx
-pm2 start "openclaw gateway run --port 7861" --name openclaw
-
-echo ">>> 等待 openclaw gateway 在 7861 端口就绪..."
-for i in $(seq 1 60); do
-  if ss -tlnp 2>/dev/null | grep -q ':7861'; then
-    echo ">>> openclaw gateway 端口已监听（${i}s）"
-    break
+run_openclaw_doctor() {
+  if command -v openclaw >/dev/null 2>&1; then
+    log "Running openclaw doctor --fix"
+    openclaw doctor --fix || warn "openclaw doctor --fix 执行失败"
+  else
+    warn "未找到 openclaw 命令，跳过 doctor"
   fi
-  if [ $i -eq 60 ]; then
-    echo ">>> WARN: openclaw gateway 60s 内未就绪，打印pm2日志："
-    pm2 logs openclaw --lines 30 --nostream || true
+}
+
+start_periodic_backup() {
+  if [ ! -f "${APP_DIR}/sync.sh" ]; then
+    warn "未找到 ${APP_DIR}/sync.sh，跳过定时备份"
+    return 0
   fi
-  sleep 1
-done
+
+  (
+    while true; do
+      sleep 3600
+      log "Running scheduled GitHub backup..."
+      cd "${APP_DIR}" && ./sync.sh git-backup >> "${GIT_BACKUP_LOG}" 2>&1 || true
+    done
+  ) &
+}
+
+start_openclaw_gateway() {
+  log "Starting openclaw gateway with pm2..."
+  pm2 delete openclaw >/dev/null 2>&1 || true
+  pm2 start "openclaw gateway run --port 7861" --name openclaw
+
+  log "等待 openclaw gateway 在 7861 端口就绪..."
+  for i in $(seq 1 60); do
+    if ss -tln 2>/dev/null | grep -q ':7861'; then
+      log "openclaw gateway 端口已监听（${i}s）"
+      return 0
+    fi
+    sleep 1
+  done
+
+  warn "openclaw gateway 60s 内未就绪，打印 pm2 日志："
+  pm2 logs openclaw --lines 50 --nostream || true
+  return 1
+}
 
 ensure_memory_index() {
-  echo ">>> 检查 memory 索引状态..."
-  STATUS_JSON=$(openclaw memory status --json 2>/dev/null || true)
-  if [ -z "$STATUS_JSON" ]; then
-    echo ">>> WARN: 无法读取 memory status，尝试强制重建"
-    timeout 600 openclaw memory index --force >> /tmp/memory-index.log 2>&1 || echo ">>> WARN: memory 强制重建失败，请查看 /tmp/memory-index.log"
-    return
+  log "检查 memory 索引状态..."
+
+  if ! command -v openclaw >/dev/null 2>&1; then
+    warn "未找到 openclaw 命令，跳过 memory 索引检查"
+    return 0
   fi
 
-  export STATUS_JSON
-  NEED_REINDEX=$(python3 <<'PY'
-import json, os
-raw = os.environ.get("STATUS_JSON", "")
+  local status_json
+  status_json="$(openclaw memory status --json 2>/dev/null || true)"
+
+  if [ -z "${status_json}" ]; then
+    warn "无法读取 memory status，尝试强制重建"
+    timeout 600 openclaw memory index --force >> "${MEMORY_INDEX_LOG}" 2>&1 || \
+      warn "memory 强制重建失败，请查看 ${MEMORY_INDEX_LOG}"
+    return 0
+  fi
+
+  export STATUS_JSON="$status_json"
+  local need_reindex
+  need_reindex="$(
+    python3 <<'PY'
+import json, os, sys
+
+raw = os.environ.get("STATUS_JSON", "").strip()
+if not raw:
+    print("yes")
+    sys.exit(0)
+
 try:
     data = json.loads(raw)
 except Exception:
     print("yes")
-    raise SystemExit
+    sys.exit(0)
 
-dirty = bool(data.get("dirty"))
-indexed = data.get("indexedFiles")
-total = data.get("totalFiles")
-chunks = data.get("chunkCount")
+def normalize(obj):
+    if isinstance(obj, dict):
+        return obj
+    if isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, dict):
+                keys = set(item.keys())
+                if {"dirty", "indexedFiles", "totalFiles", "chunkCount"} & keys:
+                    return item
+        if obj and isinstance(obj[0], dict):
+            return obj[0]
+    return {}
 
-need = dirty or indexed in (None, 0) or chunks in (None, 0) or (total not in (None, 0) and indexed != total)
-print("yes" if need else "no")
-PY
+d = normalize(data)
+
+dirty = bool(d.get("dirty"))
+indexed = d.get("indexedFiles")
+total = d.get("totalFiles")
+chunks = d.get("chunkCount")
+
+need = (
+    dirty or
+    indexed in (None, 0) or
+    chunks in (None, 0) or
+    (total not in (None, 0) and indexed != total)
 )
 
-  if [ "$NEED_REINDEX" = "yes" ]; then
-    echo ">>> Memory 索引缺失或脏，开始强制重建..."
-    timeout 600 openclaw memory index --force >> /tmp/memory-index.log 2>&1 || echo ">>> WARN: memory 强制重建失败，请查看 /tmp/memory-index.log"
+print("yes" if need else "no")
+PY
+  )"
+
+  if [ "$need_reindex" = "yes" ]; then
+    log "Memory 索引缺失或脏，开始强制重建..."
+    timeout 600 openclaw memory index --force >> "${MEMORY_INDEX_LOG}" 2>&1 || \
+      warn "memory 强制重建失败，请查看 ${MEMORY_INDEX_LOG}"
   else
-    echo ">>> Memory 索引已就绪，跳过重建"
+    log "Memory 索引已就绪，跳过重建"
   fi
 }
 
-ensure_memory_index
+start_nginx() {
+  log "Testing nginx config..."
+  nginx -t
 
-nginx -g 'daemon off;' &
+  log "Starting nginx..."
+  nginx -g 'daemon off;' &
+}
 
-echo "======================启动code-server服务========================"
-export PASSWORD=$OPENCLAW_GATEWAY_PASSWORD
-pm2 start "code-server --bind-addr 0.0.0.0:7862 --port 7862" --name "code-server"
-pm2 startup
-pm2 save
+start_code_server() {
+  if ! command -v code-server >/dev/null 2>&1; then
+    warn "未找到 code-server，跳过启动"
+    return 0
+  fi
 
-tail -f /dev/null
+  log "启动 code-server 服务..."
+  export PASSWORD="${OPENCLAW_GATEWAY_PASSWORD:-}"
+  pm2 delete code-server >/dev/null 2>&1 || true
+  pm2 start "code-server --bind-addr 0.0.0.0:7862 --port 7862" --name code-server
+}
+
+save_pm2() {
+  pm2 startup || true
+  pm2 save || true
+}
+
+main() {
+  ensure_dirs
+  install_system_packages
+
+  install_ollama || true
+  start_ollama || true
+  ensure_embedding_model || true
+
+  install_chromium || true
+  generate_openclaw_json
+  write_nginx_conf
+
+  restore_from_github || true
+  restore_from_rclone || true
+
+  run_openclaw_doctor || true
+  start_periodic_backup
+
+  start_openclaw_gateway || true
+  ensure_memory_index || true
+
+  start_nginx
+  start_code_server
+  save_pm2
+
+  log "All services started."
+  tail -f /dev/null
+}
+
+main "$@"
