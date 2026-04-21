@@ -291,6 +291,7 @@ cfg = {
 }
 
 if tg_bot_token:
+    tg_api_root = os.environ.get("TG_API_ROOT", "")
     tg_cfg = {
         "enabled": True,
         "botToken": tg_bot_token,
@@ -302,6 +303,8 @@ if tg_bot_token:
         "webhookHost": "0.0.0.0",
         "webhookPort": 8787
     }
+    if tg_api_root:
+        tg_cfg["apiRoot"] = tg_api_root
     cfg["channels"] = {"telegram": tg_cfg}
 
 out = json.dumps(cfg, indent=2, ensure_ascii=False)
