@@ -297,7 +297,7 @@ if tg_bot_token:
         "botToken": tg_bot_token,
         "dmPolicy": "pairing",
         "groups": {"*": {"requireMention": True}},
-        "webhookUrl": "https://wocaca-webopenclaw.hf.space/telegram/webhook",
+        "webhookUrl": "https://nishishabiba-goubiba.hf.space/telegram/webhook",
         "webhookSecret": gw_password,
         "webhookPath": "/telegram/webhook",
         "webhookHost": "0.0.0.0",
