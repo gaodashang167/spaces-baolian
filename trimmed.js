@@ -142,11 +142,10 @@ const ws = async (req, env) => {
   // PROXYIP：路径（含 proxyip./pyip=/ip= 别名）> query ?proxyip= > env 变量 > 默认兜底域名；不支持全局，始终「直连优先，失败降级」
   const _pathPxyRaw = chain ? '' : (_url.pathname.match(/\/(?:proxyip[.=]|pyip=|ip=)([^?#\s]+)/i)?.[1] || _url.searchParams.get('proxyip') || '');
   const proxyList = (_pathPxyRaw || (env?.PROXYIP || '') || CFG.dproxy).trim().split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
-  const pickProxy = () => { if (!proxyList.length) return null; const raw = proxyList[Math.floor(Math.random() * proxyList.length)]; if (raw.includes(']:')) { const idx = raw.indexOf(']:'); const h = raw.slice(0, idx + 1), p = parseInt(raw.slice(idx + 2).replace(/[^\d]/g, ''), 10); return { h, p: p > 0 && p < 65536 ? p : null }; } if (raw.startsWith('[')) return { h: raw, p: null }; const parts = raw.split(':'); if (parts.length === 2) { const p = parseInt(parts[1].replace(/[^\d]/g, ''), 10); if (p > 0 && p < 65536) return { h: parts[0], p }; } return { h: raw, p: null }; };
   const thresh = async () => { if (busy || closed) return; busy = true; try { for (;;) {
     if (closed) break; if (!sock) { const [d] = uq.bundle(); if (!d) break; const r = relay(d); if (!r) throw wither(); server.send(new Uint8Array([d[0], 0])); const host = addr(r.addrType, r.targetAddrBytes), port = r.port, payload = d.subarray(r.dataOffset); let leftover = null;
       if (chain) { if (chain.global) { const res = await chainConnect(fetcher, chain, host, port); sock = res.sock; leftover = res.leftover; extraSock = res.extra || null; } else { sock = await raceSprout(fetcher, host, port).catch(async () => { const res = await chainConnect(fetcher, chain, host, port); leftover = res.leftover; extraSock = res.extra || null; return res.sock; }); } }
-      else { sock = await raceSprout(fetcher, host, port).catch(async () => { const pxy = pickProxy(); if (!pxy) throw new Error('direct failed'); return raceSprout(fetcher, pxy.h, pxy.p || port); }); }
+      else { sock = await raceSprout(fetcher, host, port); }
       if (!sock) throw wither(); curW = sock.writable.getWriter(); if (leftover && leftover.byteLength) server.send(leftover); const [first] = uq.bundle(payload); first?.byteLength && await curW.write(first); mill(sock.readable, server).finally(() => wither()); continue; }
     const [d] = uq.bundle(); if (!d) break; await curW.write(d);
   } } catch { wither(); } finally { busy = false; !uq.empty && !closed && thresh(); } };
