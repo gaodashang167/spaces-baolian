@@ -1,4 +1,7 @@
-const CFG = { id: '2523c510-9ff0-415b-9582-93949bfae7e3', chunk: 64 * 1024, dnPack: 32 * 1024, dnTail: 512, dnQr: 4, upPack: 20 * 1024, maxED: 8 * 1024, concur: 4, dproxy: 'ProxyIP.CMLiussss.net' };
+const CFG = { id: '2523c510-9ff0-415b-9582-93949bfae7e9', chunk: 64 * 1024, dnPack: 32 * 1024, dnTail: 512, dnQr: 4, upPack: 20 * 1024, maxED: 8 * 1024, concur: 1, dproxy: 'ProxyIP.CMLiussss.net' };
+// concur 改为 1：Snippets 每请求子请求配额只有 2~5 个（按套餐），raceSprout 并发拨号 N 个就占 N 个配额；
+// 加上下面「直连失败 -> 再拨一次备用地址」的单轮 fallback，最坏情况正好是 2 次 connect()，
+// 落在 Snippets 最低档（Pro，2 个子请求）预算内；Workers 下同样兼容，只是少了并发竞速加速。
 export default { fetch: (req, env) => req.headers.get('Upgrade')?.toLowerCase() === 'websocket' ? ws(req, env) : new Response('Hello world!') }; const hex = c => (c > 64 ? c + 9 : c) & 0xF;
 const dec = new TextDecoder();
 const parseUUID = uuid => { const b = new Uint8Array(16); for (let i = 0, p = 0, c, h; i < 16; i++) { c = uuid.charCodeAt(p++); c === 45 && (c = uuid.charCodeAt(p++)); h = hex(c); c = uuid.charCodeAt(p++); c === 45 && (c = uuid.charCodeAt(p++)); b[i] = h << 4 | hex(c); } return b; };
