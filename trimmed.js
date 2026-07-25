@@ -3,8 +3,24 @@ export default { fetch: (req, env) => req.headers.get('Upgrade')?.toLowerCase() 
 const dec = new TextDecoder();
 const parseUUID = uuid => { const b = new Uint8Array(16); for (let i = 0, p = 0, c, h; i < 16; i++) { c = uuid.charCodeAt(p++); c === 45 && (c = uuid.charCodeAt(p++)); h = hex(c); c = uuid.charCodeAt(p++); c === 45 && (c = uuid.charCodeAt(p++)); b[i] = h << 4 | hex(c); } return b; };
 const addr = (t, b) => t === 1 ? `${b[0]}.${b[1]}.${b[2]}.${b[3]}` : t === 3 ? dec.decode(b) : `[${Array.from({ length: 8 }, (_, i) => ((b[i * 2] << 8) | b[i * 2 + 1]).toString(16)).join(':')}]`;
-const sprout = (f, h, p, opts, s = f.connect({ hostname: h, port: p }, opts)) => s.opened.then(() => s);
-const raceSprout = (f, h, p, opts) => { if (!f?.connect) return Promise.reject(new Error('connect unavailable')); if (CFG.concur <= 1) return sprout(f, h, p, opts); const ts = Array(CFG.concur).fill().map(() => sprout(f, h, p, opts)); return Promise.any(ts).then(w => { ts.forEach(t => t.then(s => s !== w && s.close(), () => {})); return w; }); };
+const sprout = async (h, p, opts) => {
+  const isTLS = (opts?.secureTransport === 'on') || p === 443;
+  const proto = isTLS ? 'wss' : 'ws';
+  const url = proto + '://' + h + ':' + p;
+  return new Promise((resolve, reject) => {
+    try {
+      const ws = new WebSocket(url);
+      ws.onopen = () => resolve(ws);
+      ws.onerror = () => reject(new Error('connect failed: ' + url));
+      ws.onmessage = () => {};
+    } catch (e) { reject(e); }
+  });
+};
+const raceSprout = async (h, p, opts) => {
+  if (CFG.concur <= 1) return sprout(h, p, opts);
+  const ts = Array(CFG.concur).fill().map(() => sprout(h, p, opts));
+  return Promise.any(ts).then(w => { ts.forEach(t => t.then(s => s !== w && (s.close(), true), () => {})); return w; });
+};
 
 const parseAddr = (b, o, t) => { const l = t === 3 ? b[o++] : t === 1 ? 4 : t === 4 ? 16 : null; if (l === null) return null; const n = o + l; return n > b.length ? null : { targetAddrBytes: b.subarray(o, n), dataOffset: n }; };
 const mkK = (cap, cpy = 0) => { let q = [], h = 0, b = 0, buf = null;
@@ -105,157 +121,6 @@ const readStunT = async (rd, buf) => {
     return [parseStunT(b.subarray(0, n)), b.length > n ? b.subarray(n) : null]; } catch { return [null, null]; } };
 const md5t = async s => new Uint8Array(await crypto.subtle.digest('MD5', new TextEncoder().encode(s)));
 // 域名解析（TURN/SSTP 的目标只支持 IPv4，走 CF DoH A 记录解析）
-const resolveIPv4 = async h => /^\d+\.\d+\.\d+\.\d+$/.test(h) ? h : (await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(h)}&type=A`, { headers: { Accept: 'application/dns-json' } }).then(r => r.json()).catch(() => ({}))).Answer?.find(a => a.type === 1)?.data ?? null;
-const doTurn = async (fetcher, chainHost, chainPort, user, pass, targetHost, targetPort) => {
-  const ip = await resolveIPv4(targetHost); if (!ip) throw new Error('turn: target must resolve to IPv4');
-  const ctrl = await raceSprout(fetcher, chainHost, chainPort);
-  const cw = ctrl.writable.getWriter(), cr = ctrl.readable.getReader(), tid = () => crypto.getRandomValues(new Uint8Array(12)), tp = new Uint8Array([6, 0, 0, 0]);
-  const closeAll = (...s) => s.forEach(x => { try { x?.close(); } catch {} });
-  await cw.write(tMsg(TMT.AQ, tid(), [tAttr(TAT.TRANSPORT, tp)]));
-  let [r, ex] = await readStunT(cr); if (!r) { closeAll(ctrl); throw new Error('turn: no allocate response'); }
-  let key = null, aa = []; let data;
-  const sign = m => key ? addIntegrityT(m, key) : m, peer = tAttr(TAT.PEER, xorPeer(ip, targetPort));
-  if (r.type === TMT.AE && user && parseErrT(r.attrs[TAT.ERR]) === 401) {
-    const realm = new TextDecoder().decode(r.attrs[TAT.REALM] ?? new Uint8Array(0)), nonce = r.attrs[TAT.NONCE] ?? new Uint8Array(0);
-    key = await md5t(`${user}:${realm}:${pass}`);
-    aa = [tAttr(TAT.USER, new TextEncoder().encode(user)), tAttr(TAT.REALM, new TextEncoder().encode(realm)), tAttr(TAT.NONCE, nonce)];
-    const [am, pm, cm] = await Promise.all([sign(tMsg(TMT.AQ, tid(), [tAttr(TAT.TRANSPORT, tp), ...aa])), sign(tMsg(TMT.PQ, tid(), [peer, ...aa])), sign(tMsg(TMT.CQ, tid(), [peer, ...aa]))]);
-    await cw.write(cat(am, pm, cm)); data = await raceSprout(fetcher, chainHost, chainPort);
-    [r, ex] = await readStunT(cr, ex); if (r?.type !== TMT.AO) { closeAll(ctrl, data); throw new Error('turn: allocate failed after auth'); }
-  } else if (r.type === TMT.AO) {
-    const [pm, cm] = await Promise.all([sign(tMsg(TMT.PQ, tid(), [peer, ...aa])), sign(tMsg(TMT.CQ, tid(), [peer, ...aa]))]);
-    await cw.write(cat(pm, cm)); data = await raceSprout(fetcher, chainHost, chainPort);
-  } else { closeAll(ctrl); throw new Error('turn: allocate rejected'); }
-  [r, ex] = await readStunT(cr, ex); if (r?.type !== TMT.PO) { closeAll(ctrl, data); throw new Error('turn: createpermission failed'); }
-  [r, ex] = await readStunT(cr, ex); if (r?.type !== TMT.CO || !r.attrs[TAT.CONNID]) { closeAll(ctrl, data); throw new Error('turn: connect failed'); }
-  const dw = data.writable.getWriter(), dr = data.readable.getReader();
-  await dw.write(await sign(tMsg(TMT.BQ, tid(), [tAttr(TAT.CONNID, r.attrs[TAT.CONNID]), ...aa])));
-  let extra; [r, extra] = await readStunT(dr); if (r?.type !== TMT.BO) { closeAll(ctrl, data); throw new Error('turn: connectionbind failed'); }
-  cr.releaseLock(); cw.releaseLock(); dw.releaseLock(); dr.releaseLock();
-  return { sock: data, leftover: extra || null, extra: ctrl }; };
-// ---- SSTP(SoftEther) 反代，移植自 ToiCF/CF-Workers-SoftEther 的 Softether.js ----
-// 完整 SSTP(HTTPS隧道) + PPP(LCP/PAP/IPCP) 协商 + 手工构造 IPv4/TCP 报文实现的用户态 TCP 出站链路
-// 仅支持 IPv4 目标（手工 IP 包构造是 IPv4-only，与参考实现一致，不支持 IPv6 目标）
-// PAP 账号密码：路径提供了 user/pass 则使用自定义账号；未提供则回退参考项目默认的 VPN Gate 访客账号 "vpn"/"vpn"
-const su16 = (b, o) => b[o] << 8 | b[o + 1], su32 = (b, o) => (b[o] << 24 | b[o + 1] << 16 | b[o + 2] << 8 | b[o + 3]) >>> 0;
-const srng = n => crypto.getRandomValues(new Uint8Array(n)), srng16 = () => su16(srng(2), 0), srng32 = () => su32(srng(4), 0);
-const sipB = ip => new Uint8Array(ip.split('.').map(Number)), sE = new Uint8Array(0), sMSS = 1400;
-const sPapDefault = new TextEncoder().encode(atob('dnBu')); // "vpn"，参考实现的 VPN Gate 访客默认账号
-const scksum = (d, o, n) => { let s = 0; for (let i = o; i < o + n - 1; i += 2) s += su16(d, i); if (n & 1) s += d[o + n - 1] << 8; while (s >> 16) s = (s & 0xFFFF) + (s >> 16); return (~s) & 0xFFFF; };
-const createSstp = () => {
-  let buf = sE, pppId = 1, sock, rd, wr, host, rb = new ArrayBuffer(65536);
-  const readBytes = async n => {
-    if (buf.length >= n) { const r = buf.subarray(0, n); buf = buf.subarray(n); return r; }
-    const saved = buf.length > 0 ? new Uint8Array(buf) : null, need = n - buf.length;
-    const { value, done } = await rd.readAtLeast(need, new Uint8Array(rb, 0, 65536));
-    if (done) throw 0; rb = value.buffer;
-    if (saved) { const t = cat(saved, value); buf = t.subarray(n); return t.subarray(0, n); }
-    buf = value.subarray(n); return value.subarray(0, n); };
-  const readLine = async () => {
-    for (;;) { const i = buf.indexOf(10);
-      if (i >= 0) { let l = new TextDecoder().decode(buf.subarray(0, i)); buf = buf.subarray(i + 1); return l.replace(/\r$/, ''); }
-      const saved = buf.length > 0 ? new Uint8Array(buf) : null;
-      const { value, done } = await rd.readAtLeast(1, new Uint8Array(rb, 0, 65536));
-      if (done) throw 0; rb = value.buffer; buf = saved ? cat(saved, value) : value; } };
-  const readPkt = async (ms = 10000) => {
-    let t; const to = new Promise((_, rej) => { t = setTimeout(() => rej('T'), ms); });
-    try { const h = await Promise.race([readBytes(4), to]); clearTimeout(t); const len = su16(h, 2) & 0xFFF;
-      return { ctrl: (h[1] & 1) !== 0, body: len > 4 ? await readBytes(len - 4) : sE }; } catch (e) { clearTimeout(t); throw e; } };
-  const sstpData = f => { const n = 6 + f.length, p = new Uint8Array(n); p.set([0x10, 0, ((n >> 8) & 0xF) | 0x80, n & 0xFF, 0xFF, 0x03]); p.set(f, 6); return p; };
-  const sstpCtrl = (mt, attrs = []) => {
-    const al = attrs.reduce((s, a) => s + 4 + a.data.length, 0), p = new Uint8Array(8 + al), v = new DataView(p.buffer);
-    p[0] = 0x10; p[1] = 0x01; v.setUint16(2, (8 + al) | 0x8000); v.setUint16(4, mt); v.setUint16(6, attrs.length);
-    attrs.reduce((o, a) => (p[o + 1] = a.id, v.setUint16(o + 2, 4 + a.data.length), p.set(a.data, o + 4), o + 4 + a.data.length), 8);
-    return p; };
-  const ppp = (proto, code, id, opts = []) => {
-    const ol = opts.reduce((s, o) => s + 2 + o.data.length, 0), f = new Uint8Array(6 + ol), v = new DataView(f.buffer);
-    v.setUint16(0, proto); f[2] = code; f[3] = id; v.setUint16(4, 4 + ol);
-    opts.reduce((o, x) => (f[o] = x.type, f[o + 1] = 2 + x.data.length, f.set(x.data, o + 2), o + 2 + x.data.length), 6);
-    return f; };
-  const pap = (id, userB, passB) => { const tl = 6 + 1 + userB.length + 1 + passB.length, f = new Uint8Array(2 + tl), v = new DataView(f.buffer);
-    v.setUint16(0, 0xc023); f[2] = 1; f[3] = id; v.setUint16(4, tl); f[6] = userB.length; f.set(userB, 7); f[7 + userB.length] = passB.length; f.set(passB, 8 + userB.length); return f; };
-  const parsePPP = d => { let o = d.length >= 2 && d[0] === 0xFF && d[1] === 0x03 ? 2 : 0; if (d.length - o < 4) return null;
-    const p = su16(d, o); return p === 0x0021 ? { protocol: p, ip: d.subarray(o + 2) } : d.length - o >= 6 ? { protocol: p, code: d[o + 2], id: d[o + 3], payload: d.subarray(o + 6), raw: d.subarray(o) } : null; };
-  const parseOpts = d => { const r = []; for (let i = 0; i + 2 <= d.length;) { const t = d[i], l = d[i + 1]; if (l < 2 || i + l > d.length) break; r.push({ type: t, data: d.subarray(i + 2, i + l) }); i += l; } return r; };
-  const connect_ = async (fetcher, h, p) => { sock = await raceSprout(fetcher, h, p, { secureTransport: 'on' });
-    rd = sock.readable.getReader({ mode: 'byob' }); wr = sock.writable.getWriter(); host = h; };
-  const establish = async (userB, passB) => {
-    const http = new TextEncoder().encode(`SSTP_DUPLEX_POST /sra_{BA195980-CD49-458b-9E23-C84EE0ADCD75}/ HTTP/1.1\r\nHost: ${host}\r\nContent-Length: 18446744073709551615\r\nSSTPCORRELATIONID: {${crypto.randomUUID()}}\r\n\r\n`);
-    const pa = new Uint8Array(2); new DataView(pa.buffer).setUint16(0, 1); const mru = new Uint8Array(2); new DataView(mru.buffer).setUint16(0, 1500);
-    await wr.write(cat(http, sstpCtrl(0x0001, [{ id: 1, data: pa }]), sstpData(ppp(0xc021, 1, pppId++, [{ type: 1, data: mru }]))));
-    const st = await readLine(); while ((await readLine()) !== ''); if (!st.includes('200')) throw 0;
-    let sa = false, ld = false, auth = false, done = false, myIp = null;
-    for (let r = 0; r < 25 && !done; r++) {
-      const pk = await readPkt(); if (pk.ctrl) { if (!sa && pk.body.length >= 2 && su16(pk.body, 0) === 2) sa = true; continue; }
-      const pp = parsePPP(pk.body); if (!pp) continue;
-      if (pp.protocol === 0xc021) {
-        if (pp.code === 1) { const a = new Uint8Array(pp.raw); a[2] = 2;
-          await wr.write(ld && !auth ? cat(sstpData(a), sstpData(pap(pppId++, userB, passB))) : sstpData(a)); if (ld) auth = true;
-        } else if (pp.code === 2) { ld = true; if (!auth) { await wr.write(sstpData(pap(pppId++, userB, passB))); auth = true; } }
-      } else if (pp.protocol === 0xc023 && pp.code === 2) await wr.write(sstpData(ppp(0x8021, 1, pppId++, [{ type: 3, data: new Uint8Array(4) }])));
-      else if (pp.protocol === 0x8021) {
-        if (pp.code === 1) { const a = new Uint8Array(pp.raw); a[2] = 2; await wr.write(sstpData(a)); }
-        else if (pp.code === 3) { const o = parseOpts(pp.payload).find(x => x.type === 3); if (o) { myIp = [...o.data].join('.'); await wr.write(sstpData(ppp(0x8021, 1, pppId++, [{ type: 3, data: o.data }]))); } }
-        else if (pp.code === 2) { const o = parseOpts(pp.payload).find(x => x.type === 3); if (o) myIp = [...o.data].join('.'); done = true; }
-      } }
-    if (!myIp) throw 0; return myIp; };
-  const close = () => { [rd, wr, sock].forEach(x => { try { x?.cancel?.() ?? x?.close?.(); } catch {} }); };
-  return { connect: connect_, establish, readPkt, parsePPP, get buf() { return buf; }, get wr() { return wr; }, close }; };
-const createTcp = (sstp, srcIp, dstIp, dstPort) => {
-  const srcPort = 10000 + (srng16() % 50000), srcB = sipB(srcIp), dstB = sipB(dstIp);
-  let seq = srng32(), ack = 0;
-  const ipTpl = new Uint8Array(20); ipTpl.set([0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6]); ipTpl.set(srcB, 12); ipTpl.set(dstB, 16);
-  const pseudo = new Uint8Array(1432); pseudo.set(srcB); pseudo.set(dstB, 4); pseudo[9] = 6;
-  const frame = (flags, data = sE) => {
-    const pl = data.length, tl = 20 + pl, il = 20 + tl, st = 8 + il, f = new Uint8Array(st), v = new DataView(f.buffer);
-    f.set([0x10, 0, ((st >> 8) & 0xF) | 0x80, st & 0xFF, 0xFF, 0x03, 0, 0x21]); f.set(ipTpl, 8);
-    v.setUint16(10, il); v.setUint16(12, srng16()); v.setUint16(18, scksum(f, 8, 20));
-    v.setUint16(28, srcPort); v.setUint16(30, dstPort); v.setUint32(32, seq); v.setUint32(36, ack);
-    f[40] = 0x50; f[41] = flags; v.setUint16(42, 65535); if (pl) f.set(data, 48);
-    pseudo[10] = tl >> 8; pseudo[11] = tl & 0xFF; pseudo.set(f.subarray(28, 28 + tl), 12);
-    v.setUint16(44, scksum(pseudo, 0, 12 + tl)); return f; };
-  const match = ip => { if (ip.length < 40 || ip[9] !== 6) return null; const ihl = (ip[0] & 0xF) * 4;
-    if (su16(ip, ihl) !== dstPort || su16(ip, ihl + 2) !== srcPort) return null;
-    return { flags: ip[ihl + 13], seq: su32(ip, ihl + 4), off: ihl + ((ip[ihl + 12] >> 4) & 0xF) * 4 }; };
-  const handshake = async () => {
-    await sstp.wr.write(frame(0x02)); seq++;
-    for (let i = 0; i < 30; i++) { const pk = await sstp.readPkt(); if (pk.ctrl) continue;
-      const pp = sstp.parsePPP(pk.body); if (!pp || pp.protocol !== 0x0021) continue;
-      const m = match(pp.ip); if (!m || (m.flags & 0x12) !== 0x12) continue;
-      ack = (m.seq + 1) >>> 0; sstp.wr.write(frame(0x10)); return true; }
-    throw 0; };
-  return { frame, match, handshake, get seq() { return seq; }, set seq(v) { seq = v; }, get ack() { return ack; }, set ack(v) { ack = v; } }; };
-const sstpConn = async (fetcher, sstpHost, sstpPort, ipP, targetPort, userB, passB) => {
-  const sstp = createSstp(), close = () => sstp.close();
-  try {
-    await sstp.connect(fetcher, sstpHost, sstpPort);
-    const [myIp, targetIp] = await Promise.all([sstp.establish(userB, passB), ipP]); if (!targetIp) { close(); return null; }
-    const tcp = createTcp(sstp, myIp, targetIp, targetPort); await tcp.handshake();
-    let ctrl = null;
-    const readable = new ReadableStream({ start: c => { ctrl = c; }, cancel: close });
-    (async () => {
-      try { let pend = [], pLen = 0;
-        const flush = () => { if (!pLen) return; ctrl.enqueue(pend.length === 1 ? pend[0] : cat(...pend)); pend = []; pLen = 0; sstp.wr.write(tcp.frame(0x10)).catch(() => {}); };
-        for (;;) { const pk = await sstp.readPkt(60000); if (pk.ctrl) continue;
-          const pp = sstp.parsePPP(pk.body); if (!pp || pp.protocol !== 0x0021) continue;
-          const m = tcp.match(pp.ip); if (!m) continue;
-          if (m.off < pp.ip.length) { const d = pp.ip.subarray(m.off); if (d.length) { tcp.ack = (m.seq + d.length) >>> 0; pend.push(new Uint8Array(d)); pLen += d.length; } }
-          if (m.flags & 0x01) { flush(); tcp.ack = (tcp.ack + 1) >>> 0; sstp.wr.write(tcp.frame(0x11)).catch(() => {}); ctrl.close(); return; }
-          if (sstp.buf.length < 4 || pLen >= 32768) flush(); }
-      } catch { try { ctrl.close(); } catch {} } })();
-    const writable = new WritableStream({
-      async write(chunk) { const d = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
-        if (d.length <= sMSS) { await sstp.wr.write(tcp.frame(0x18, d)); tcp.seq = (tcp.seq + d.length) >>> 0; return; }
-        const frames = []; for (let o = 0; o < d.length; o += sMSS) { const seg = d.subarray(o, Math.min(o + sMSS, d.length)); frames.push(tcp.frame(0x18, seg)); tcp.seq = (tcp.seq + seg.length) >>> 0; }
-        await sstp.wr.write(cat(...frames)); }, close: () => sstp.wr.write(tcp.frame(0x11)).catch(() => {}), abort: close });
-    return { readable, writable, close };
-  } catch { close(); return null; } };
-const doSstp = async (fetcher, chain, host, port) => {
-  const ipP = /^\d+\.\d+\.\d+\.\d+$/.test(host) ? host : resolveIPv4(host);
-  const userB = chain.user ? new TextEncoder().encode(chain.user) : sPapDefault;
-  const passB = chain.pass ? new TextEncoder().encode(chain.pass) : sPapDefault;
-  const sock = await sstpConn(fetcher, chain.host, chain.port, ipP, port, userB, passB);
-  if (!sock) throw new Error('sstp: connection failed'); return sock; };
 // HTTP(S) CONNECT 隧道；https 模式下 sock 本身已是 TLS（见 chainConnect 的 secureTransport）
 const doHttpConnect = async (sock, user, pass, host, port) => {
   const w = sock.writable.getWriter(), hr = sock.readable.getReader(), rb = mkRB(hr), enc = new TextEncoder(), dec = new TextDecoder();
@@ -268,18 +133,16 @@ const doHttpConnect = async (sock, user, pass, host, port) => {
   const statusLine = dec.decode(head).split('\r\n')[0]; if (!/\s2\d\d(\s|$)/.test(statusLine)) throw new Error('http proxy: ' + statusLine);
   const leftover = rb.rest.slice(); w.releaseLock(); hr.releaseLock(); return leftover; };
 // 反代协议分发：socks5/http/https/turn/sstp 全部走真实协议实现
-const chainConnect = async (fetcher, chain, host, port) => {
-  if (chain.proto === 'socks5') { const sock = await raceSprout(fetcher, chain.host, chain.port); const leftover = await doSocks5(sock, chain.user, chain.pass, host, port); return { sock, leftover }; }
-  if (chain.proto === 'http') { const sock = await raceSprout(fetcher, chain.host, chain.port); const leftover = await doHttpConnect(sock, chain.user, chain.pass, host, port); return { sock, leftover }; }
+const chainConnect = async (chain, host, port) => {
+  if (chain.proto === 'socks5') { const sock = await raceSprout(chain.host, chain.port); const leftover = await doSocks5(sock, chain.user, chain.pass, host, port); return { sock, leftover }; }
+  if (chain.proto === 'http') { const sock = await raceSprout(chain.host, chain.port); const leftover = await doHttpConnect(sock, chain.user, chain.pass, host, port); return { sock, leftover }; }
   // https：代理主机是域名走原生 secureTransport（快，Cloudflare 原生 TLS 校验证书）；是裸IP则原生TLS无法校验证书，改走 Mini TLS（跳过校验），对齐 edgetunnel 的 isIPHostname 判断逻辑
   if (chain.proto === 'https') {
-    const sock = await raceSprout(fetcher, chain.host, chain.port, { secureTransport: 'on' }); const leftover = await doHttpConnect(sock, chain.user, chain.pass, host, port); return { sock, leftover };
+    const sock = await raceSprout(chain.host, chain.port, { secureTransport: 'on' }); const leftover = await doHttpConnect(sock, chain.user, chain.pass, host, port); return { sock, leftover };
   }
-  if (chain.proto === 'turn') { return doTurn(fetcher, chain.host, chain.port, chain.user, chain.pass, host, port); }
-  if (chain.proto === 'sstp') { const sock = await doSstp(fetcher, chain, host, port); return { sock, leftover: null }; }
-  const sock = await raceSprout(fetcher, chain.host, chain.port); return { sock, leftover: null }; };
+  const sock = await raceSprout(chain.host, chain.port); return { sock, leftover: null }; };
 const ws = async (req, env) => {
-  const [client, server] = Object.values(new WebSocketPair()); server.accept({ allowHalfOpen: true }); server.binaryType = 'arraybuffer'; const fetcher = req.fetcher; const _url = new URL(req.url);
+  const [client, server] = Object.values(new WebSocketPair()); server.accept({ allowHalfOpen: true }); server.binaryType = 'arraybuffer'; const _url = new URL(req.url);
   // UUID：env.UUID 优先，未设置则用 CFG.id 默认值（同 PROXYIP 的优先级模式）；relay/matchID 每次连接内按此生成，因为 env 只在请求时可得
   const _uuidStr = (env?.UUID || CFG.id).trim();
   const idB = parseUUID(_uuidStr);
@@ -316,8 +179,8 @@ const ws = async (req, env) => {
   const pickProxy = () => { if (!proxyList.length) return null; const raw = proxyList[Math.floor(Math.random() * proxyList.length)]; if (raw.includes(']:')) { const idx = raw.indexOf(']:'); const h = raw.slice(0, idx + 1), p = parseInt(raw.slice(idx + 2).replace(/[^\d]/g, ''), 10); return { h, p: p > 0 && p < 65536 ? p : null }; } if (raw.startsWith('[')) return { h: raw, p: null }; const parts = raw.split(':'); if (parts.length === 2) { const p = parseInt(parts[1].replace(/[^\d]/g, ''), 10); if (p > 0 && p < 65536) return { h: parts[0], p }; } return { h: raw, p: null }; };
   const thresh = async () => { if (busy || closed) return; busy = true; try { for (;;) {
     if (closed) break; if (!sock) { const [d] = uq.bundle(); if (!d) break; const r = relay(d); if (!r) throw wither(); server.send(new Uint8Array([d[0], 0])); const host = addr(r.addrType, r.targetAddrBytes), port = r.port, payload = d.subarray(r.dataOffset); let leftover = null;
-      if (chain) { if (chain.global) { const res = await chainConnect(fetcher, chain, host, port); sock = res.sock; leftover = res.leftover; extraSock = res.extra || null; } else { sock = await raceSprout(fetcher, host, port).catch(async () => { const res = await chainConnect(fetcher, chain, host, port); leftover = res.leftover; extraSock = res.extra || null; return res.sock; }); } }
-      else { sock = await raceSprout(fetcher, host, port).catch(async () => { const pxy = pickProxy(); if (!pxy) throw new Error('direct failed'); return raceSprout(fetcher, pxy.h, pxy.p || port); }); }
+      if (chain) { if (chain.global) { const res = await chainConnect(chain, host, port); sock = res.sock; leftover = res.leftover; extraSock = res.extra || null; } else { sock = await raceSprout(host, port).catch(async () => { const res = await chainConnect(chain, host, port); leftover = res.leftover; extraSock = res.extra || null; return res.sock; }); } }
+      else { sock = await raceSprout(host, port).catch(async () => { const pxy = pickProxy(); if (!pxy) throw new Error('direct failed'); return raceSprout(pxy.h, pxy.p || port); }); }
       if (!sock) throw wither(); curW = sock.writable.getWriter(); if (leftover && leftover.byteLength) server.send(leftover); const [first] = uq.bundle(payload); first?.byteLength && await curW.write(first); mill(sock.readable, server).finally(() => wither()); continue; }
     const [d] = uq.bundle(); if (!d) break; await curW.write(d);
   } } catch { wither(); } finally { busy = false; !uq.empty && !closed && thresh(); } };
