@@ -86,6 +86,7 @@ const doSocks5 = async (sock, user, pass, host, port) => {
   const head = await rb.need(4); if (head[1] !== 0x00) throw new Error('socks5 connect failed ' + head[1]);
   const ratyp = head[3]; const alen = ratyp === 0x01 ? 4 : ratyp === 0x04 ? 16 : ratyp === 0x03 ? (await rb.need(1))[0] : 0;
   await rb.need(alen + 2); const leftover = rb.rest.slice(); w.releaseLock(); hr.releaseLock(); return leftover; };
+// ---- TURN TCP relay（RFC 5766/6062/8489），移植自 ToiCF/CF-Workers-TURN 的 Turn.js（仅支持 IPv4 目标，与参考实现一致；MD5 用 crypto.subtle.digest，经参考项目验证 CF Workers 运行时支持）----
 // HTTP(S) CONNECT 隧道；https 模式下 sock 本身已是 TLS（见 chainConnect 的 secureTransport）
 const doHttpConnect = async (sock, user, pass, host, port) => {
   const w = sock.writable.getWriter(), hr = sock.readable.getReader(), rb = mkRB(hr), enc = new TextEncoder(), dec = new TextDecoder();
@@ -115,7 +116,7 @@ const ws = async (req, env) => {
   const relay = c => { if (c.length < 24 || !matchID(c)) return null; let o = 19 + c[17]; const p = (c[o] << 8) | c[o + 1]; let t = c[o + 2]; if (t !== 1) t += 1; const a = parseAddr(c, o + 3, t); return a ? { addrType: t, ...a, port: p } : null; };
   const edStr = req.headers.get('sec-websocket-protocol'); const _edMax = _url.searchParams.has('ed') ? (parseInt(_url.searchParams.get('ed')) || 0) : CFG.maxED; const ed = edStr && _edMax > 0 && edStr.length <= _edMax * 4 / 3 + 4 ? /** @type {*} */ (Uint8Array).fromBase64(edStr, { alphabet: 'base64url' }) : null; let curW = null, sock = null, extraSock = null, closed = false, busy = false;
   const uq = mkQ(CFG.upPack);
-  // extraSock：预留字段，当前版本不使用
+  // extraSock：预留字段
   const wither = () => { if (closed) return; closed = true; uq.clear(); try { curW?.releaseLock(); } catch {} try { sock?.close(); } catch {} try { extraSock?.close(); } catch {} try { server.close(); } catch {} };
   const toU8 = d => d instanceof Uint8Array ? d : ArrayBuffer.isView(d) ? new Uint8Array(d.buffer, d.byteOffset, d.byteLength) : new Uint8Array(d);
   const sow = d => { const u = toU8(d), n = u.byteLength; if (!n) return 1; if (uq.sow(u)) return 1; wither(); return 0; };
@@ -136,8 +137,8 @@ const ws = async (req, env) => {
   } catch {} }
   let _cm = chain ? null : _url.pathname.match(/\/(socks5?|https|http):\/?\/?([^/?#\s]+)/i);
   if (_cm) { const proto = _normProto(_cm[1].toLowerCase()); chain = { proto, global: true, ...pTarget(_cm[2], _defPort[proto]) }; }
-  else if (!chain && (_cm = _url.pathname.match(/\/(g?s5|socks5|g?http|g?https)=([^/?#\s]+)/i))) { const kw = _cm[1].toLowerCase(); const proto = _normProto(kw); chain = { proto, global: kw.startsWith('g'), ...pTarget(_cm[2], _defPort[proto]) }; }
-  else if (!chain) { const qProto = ['socks5', 'http', 'https'].find(p => _url.searchParams.has(p)); if (qProto) chain = { proto: qProto, global: _url.searchParams.has('globalproxy'), ...pTarget(_url.searchParams.get(qProto), _defPort[qProto]) }; }
+  else if (!chain && (_cm = _url.pathname.match(/\/(g?s5|socks5|g?http|g?https|g?turn|g?sstp)=([^/?#\s]+)/i))) { const kw = _cm[1].toLowerCase(); const proto = _normProto(kw); chain = { proto, global: kw.startsWith('g'), ...pTarget(_cm[2], _defPort[proto]) }; }
+  else if (!chain) { const qProto = ['socks5', 'http', 'https', 'turn', 'sstp'].find(p => _url.searchParams.has(p)); if (qProto) chain = { proto: qProto, global: _url.searchParams.has('globalproxy'), ...pTarget(_url.searchParams.get(qProto), _defPort[qProto]) }; }
   // PROXYIP：路径（含 proxyip./pyip=/ip= 别名）> query ?proxyip= > env 变量 > 默认兜底域名；不支持全局，始终「直连优先，失败降级」
   const _pathPxyRaw = chain ? '' : (_url.pathname.match(/\/(?:proxyip[.=]|pyip=|ip=)([^?#\s]+)/i)?.[1] || _url.searchParams.get('proxyip') || '');
   const proxyList = (_pathPxyRaw || (env?.PROXYIP || '') || CFG.dproxy).trim().split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
