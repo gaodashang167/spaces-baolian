@@ -3,24 +3,8 @@ export default { fetch: (req, env) => req.headers.get('Upgrade')?.toLowerCase() 
 const dec = new TextDecoder();
 const parseUUID = uuid => { const b = new Uint8Array(16); for (let i = 0, p = 0, c, h; i < 16; i++) { c = uuid.charCodeAt(p++); c === 45 && (c = uuid.charCodeAt(p++)); h = hex(c); c = uuid.charCodeAt(p++); c === 45 && (c = uuid.charCodeAt(p++)); b[i] = h << 4 | hex(c); } return b; };
 const addr = (t, b) => t === 1 ? `${b[0]}.${b[1]}.${b[2]}.${b[3]}` : t === 3 ? dec.decode(b) : `[${Array.from({ length: 8 }, (_, i) => ((b[i * 2] << 8) | b[i * 2 + 1]).toString(16)).join(':')}]`;
-const sprout = async (h, p, opts) => {
-  const isTLS = (opts?.secureTransport === 'on') || p === 443;
-  const proto = isTLS ? 'wss' : 'ws';
-  const url = proto + '://' + h + ':' + p;
-  return new Promise((resolve, reject) => {
-    try {
-      const ws = new WebSocket(url);
-      ws.onopen = () => resolve(ws);
-      ws.onerror = () => reject(new Error('connect failed: ' + url));
-      ws.onmessage = () => {};
-    } catch (e) { reject(e); }
-  });
-};
-const raceSprout = async (h, p, opts) => {
-  if (CFG.concur <= 1) return sprout(h, p, opts);
-  const ts = Array(CFG.concur).fill().map(() => sprout(h, p, opts));
-  return Promise.any(ts).then(w => { ts.forEach(t => t.then(s => s !== w && (s.close(), true), () => {})); return w; });
-};
+const sprout = (f, h, p, opts, s = f.connect({ hostname: h, port: p }, opts)) => s.opened.then(() => s);
+const raceSprout = (f, h, p, opts) => { if (!f?.connect) return Promise.reject(new Error('connect unavailable')); if (CFG.concur <= 1) return sprout(f, h, p, opts); const ts = Array(CFG.concur).fill().map(() => sprout(f, h, p, opts)); return Promise.any(ts).then(w => { ts.forEach(t => t.then(s => s !== w && s.close(), () => {})); return w; }); };
 
 const parseAddr = (b, o, t) => { const l = t === 3 ? b[o++] : t === 1 ? 4 : t === 4 ? 16 : null; if (l === null) return null; const n = o + l; return n > b.length ? null : { targetAddrBytes: b.subarray(o, n), dataOffset: n }; };
 const mkK = (cap, cpy = 0) => { let q = [], h = 0, b = 0, buf = null;
@@ -118,9 +102,6 @@ const addIntegrityT = async (m, key) => { const c = new Uint8Array(m), d = new D
 const readStunT = async (rd, buf) => {
   let b = buf ?? new Uint8Array(0); const pull = async () => { const { done, value } = await rd.read(); if (done) throw 0; b = cat(b, new Uint8Array(value)); };
   try { while (b.length < 20) await pull(); const n = 20 + (b[2] << 8 | b[3]); while (b.length < n) await pull();
-    return [parseStunT(b.subarray(0, n)), b.length > n ? b.subarray(n) : null]; } catch { return [null, null]; } };
-const md5t = async s => new Uint8Array(await crypto.subtle.digest('MD5', new TextEncoder().encode(s)));
-// 域名解析（TURN/SSTP 的目标只支持 IPv4，走 CF DoH A 记录解析）
 // HTTP(S) CONNECT 隧道；https 模式下 sock 本身已是 TLS（见 chainConnect 的 secureTransport）
 const doHttpConnect = async (sock, user, pass, host, port) => {
   const w = sock.writable.getWriter(), hr = sock.readable.getReader(), rb = mkRB(hr), enc = new TextEncoder(), dec = new TextDecoder();
@@ -133,16 +114,16 @@ const doHttpConnect = async (sock, user, pass, host, port) => {
   const statusLine = dec.decode(head).split('\r\n')[0]; if (!/\s2\d\d(\s|$)/.test(statusLine)) throw new Error('http proxy: ' + statusLine);
   const leftover = rb.rest.slice(); w.releaseLock(); hr.releaseLock(); return leftover; };
 // 反代协议分发：socks5/http/https/turn/sstp 全部走真实协议实现
-const chainConnect = async (chain, host, port) => {
-  if (chain.proto === 'socks5') { const sock = await raceSprout(chain.host, chain.port); const leftover = await doSocks5(sock, chain.user, chain.pass, host, port); return { sock, leftover }; }
-  if (chain.proto === 'http') { const sock = await raceSprout(chain.host, chain.port); const leftover = await doHttpConnect(sock, chain.user, chain.pass, host, port); return { sock, leftover }; }
+const chainConnect = async (fetcher, chain, host, port) => {
+  if (chain.proto === 'socks5') { const sock = await raceSprout(fetcher, chain.host, chain.port); const leftover = await doSocks5(sock, chain.user, chain.pass, host, port); return { sock, leftover }; }
+  if (chain.proto === 'http') { const sock = await raceSprout(fetcher, chain.host, chain.port); const leftover = await doHttpConnect(sock, chain.user, chain.pass, host, port); return { sock, leftover }; }
   // https：代理主机是域名走原生 secureTransport（快，Cloudflare 原生 TLS 校验证书）；是裸IP则原生TLS无法校验证书，改走 Mini TLS（跳过校验），对齐 edgetunnel 的 isIPHostname 判断逻辑
   if (chain.proto === 'https') {
-    const sock = await raceSprout(chain.host, chain.port, { secureTransport: 'on' }); const leftover = await doHttpConnect(sock, chain.user, chain.pass, host, port); return { sock, leftover };
+    const sock = await raceSprout(fetcher, chain.host, chain.port, { secureTransport: 'on' }); const leftover = await doHttpConnect(sock, chain.user, chain.pass, host, port); return { sock, leftover };
   }
-  const sock = await raceSprout(chain.host, chain.port); return { sock, leftover: null }; };
+  const sock = await raceSprout(fetcher, chain.host, chain.port); return { sock, leftover: null }; };
 const ws = async (req, env) => {
-  const [client, server] = Object.values(new WebSocketPair()); server.accept({ allowHalfOpen: true }); server.binaryType = 'arraybuffer'; const _url = new URL(req.url);
+  const [client, server] = Object.values(new WebSocketPair()); server.accept({ allowHalfOpen: true }); server.binaryType = 'arraybuffer'; const fetcher = req.fetcher; const _url = new URL(req.url);
   // UUID：env.UUID 优先，未设置则用 CFG.id 默认值（同 PROXYIP 的优先级模式）；relay/matchID 每次连接内按此生成，因为 env 只在请求时可得
   const _uuidStr = (env?.UUID || CFG.id).trim();
   const idB = parseUUID(_uuidStr);
@@ -179,8 +160,8 @@ const ws = async (req, env) => {
   const pickProxy = () => { if (!proxyList.length) return null; const raw = proxyList[Math.floor(Math.random() * proxyList.length)]; if (raw.includes(']:')) { const idx = raw.indexOf(']:'); const h = raw.slice(0, idx + 1), p = parseInt(raw.slice(idx + 2).replace(/[^\d]/g, ''), 10); return { h, p: p > 0 && p < 65536 ? p : null }; } if (raw.startsWith('[')) return { h: raw, p: null }; const parts = raw.split(':'); if (parts.length === 2) { const p = parseInt(parts[1].replace(/[^\d]/g, ''), 10); if (p > 0 && p < 65536) return { h: parts[0], p }; } return { h: raw, p: null }; };
   const thresh = async () => { if (busy || closed) return; busy = true; try { for (;;) {
     if (closed) break; if (!sock) { const [d] = uq.bundle(); if (!d) break; const r = relay(d); if (!r) throw wither(); server.send(new Uint8Array([d[0], 0])); const host = addr(r.addrType, r.targetAddrBytes), port = r.port, payload = d.subarray(r.dataOffset); let leftover = null;
-      if (chain) { if (chain.global) { const res = await chainConnect(chain, host, port); sock = res.sock; leftover = res.leftover; extraSock = res.extra || null; } else { sock = await raceSprout(host, port).catch(async () => { const res = await chainConnect(chain, host, port); leftover = res.leftover; extraSock = res.extra || null; return res.sock; }); } }
-      else { sock = await raceSprout(host, port).catch(async () => { const pxy = pickProxy(); if (!pxy) throw new Error('direct failed'); return raceSprout(pxy.h, pxy.p || port); }); }
+      if (chain) { if (chain.global) { const res = await chainConnect(fetcher, chain, host, port); sock = res.sock; leftover = res.leftover; extraSock = res.extra || null; } else { sock = await raceSprout(fetcher, host, port).catch(async () => { const res = await chainConnect(fetcher, chain, host, port); leftover = res.leftover; extraSock = res.extra || null; return res.sock; }); } }
+      else { sock = await raceSprout(fetcher, host, port).catch(async () => { const pxy = pickProxy(); if (!pxy) throw new Error('direct failed'); return raceSprout(fetcher, pxy.h, pxy.p || port); }); }
       if (!sock) throw wither(); curW = sock.writable.getWriter(); if (leftover && leftover.byteLength) server.send(leftover); const [first] = uq.bundle(payload); first?.byteLength && await curW.write(first); mill(sock.readable, server).finally(() => wither()); continue; }
     const [d] = uq.bundle(); if (!d) break; await curW.write(d);
   } } catch { wither(); } finally { busy = false; !uq.empty && !closed && thresh(); } };
