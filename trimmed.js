@@ -5,6 +5,8 @@ const parseUUID = uuid => { const b = new Uint8Array(16); for (let i = 0, p = 0,
 const addr = (t, b) => t === 1 ? `${b[0]}.${b[1]}.${b[2]}.${b[3]}` : t === 3 ? dec.decode(b) : `[${Array.from({ length: 8 }, (_, i) => ((b[i * 2] << 8) | b[i * 2 + 1]).toString(16)).join(':')}]`;
 const sprout = (f, h, p, opts, s = f.connect({ hostname: h, port: p }, opts)) => s.opened.then(() => s);
 const raceSprout = (f, h, p, opts) => { if (!f?.connect) return Promise.reject(new Error('connect unavailable')); if (CFG.concur <= 1) return sprout(f, h, p, opts); const ts = Array(CFG.concur).fill().map(() => sprout(f, h, p, opts)); return Promise.any(ts).then(w => { ts.forEach(t => t.then(s => s !== w && s.close(), () => {})); return w; }); };
+// ---- Mini TLS client（用于 HTTPS 链式代理的 IP 直连场景，原生 secureTransport 无法跳过证书校验时使用），
+// 整体照搬自 ToiCF/CF-Workers-HTTPS 的 HTTPSMini.js（TLSClientMini 核心），用 IIFE 隔离作用域避免变量名冲突，内部逻辑未做任何改动 ----
 
 const parseAddr = (b, o, t) => { const l = t === 3 ? b[o++] : t === 1 ? 4 : t === 4 ? 16 : null; if (l === null) return null; const n = o + l; return n > b.length ? null : { targetAddrBytes: b.subarray(o, n), dataOffset: n }; };
 const mkK = (cap, cpy = 0) => { let q = [], h = 0, b = 0, buf = null;
@@ -28,7 +30,7 @@ const mkDn = w => { const cap = CFG.dnPack, tail = CFG.dnTail, low = Math.max(40
 const mill = async (rd, w) => { let r, byob = 1; try { r = rd.getReader({ mode: 'byob' }); } catch { byob = 0; r = rd.getReader(); } const tx = mkDn(w);
   if (byob) { let buf = new ArrayBuffer(CFG.chunk);
     try { for (;;) { const { done, value: v } = await r.read(new Uint8Array(buf, 0, CFG.chunk)); if (done) break; if (!v?.byteLength) continue; if (v.byteLength >= (CFG.chunk >> 1)) tx.reap(), w.send(v), buf = new ArrayBuffer(CFG.chunk); else tx.send(v.slice()), buf = v.buffer; } tx.reap(); } catch {} finally { try { tx.reap(); } catch {} try { r.releaseLock(); } catch {} } return; }
-  // 非字节流（如 TURN/SSTP 自建的虚拟 TCP 流）不支持 BYOB，降级为普通 reader 循环
+  // 非字节流（）不支持 BYOB，降级为普通 reader 循环
   try { for (;;) { const { done, value: v } = await r.read(); if (done) break; if (!v?.byteLength) continue; if (v.byteLength >= (CFG.chunk >> 1)) tx.reap(), w.send(v); else tx.send(v); } tx.reap(); } catch {} finally { try { tx.reap(); } catch {} try { r.releaseLock(); } catch {} } };
 // ---- 反代链式协议：路径 target 解析（host/port/user/pass，支持 IPv6 [::]） ----
 // /video/<加密串> 路径格式用的解密函数：明文按 UTF-8 转字节后与密钥（UUID字符串本身，含横杠）逐字节重复异或，再 base64；解密是逆过程
@@ -43,7 +45,7 @@ const base64SecretDecode = (encoded, secret) => {
 // 账号密码支持 base64（自动识别：不含 ':' 且匹配 base64 字符集才解码，否则按明文处理）；IPv6 保留方括号；端口解析用去除非数字字符而非 parseInt 截断
 const B64RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const pTarget = (raw, defPort) => {
-  let address = String(raw || '').trim().replace(/^(socks5|http|https|turn|sstp):\/\//i, '').split('#')[0].trim();
+  let address = String(raw || '').trim().replace(/^(socks5|http|https):\/\//i, '').split('#')[0].trim();
   let user = '', pass = '';
   const at = address.lastIndexOf('@');
   if (at > -1) {
@@ -84,24 +86,6 @@ const doSocks5 = async (sock, user, pass, host, port) => {
   const head = await rb.need(4); if (head[1] !== 0x00) throw new Error('socks5 connect failed ' + head[1]);
   const ratyp = head[3]; const alen = ratyp === 0x01 ? 4 : ratyp === 0x04 ? 16 : ratyp === 0x03 ? (await rb.need(1))[0] : 0;
   await rb.need(alen + 2); const leftover = rb.rest.slice(); w.releaseLock(); hr.releaseLock(); return leftover; };
-// ---- TURN TCP relay（RFC 5766/6062/8489），移植自 ToiCF/CF-Workers-TURN 的 Turn.js（仅支持 IPv4 目标，与参考实现一致；MD5 用 crypto.subtle.digest，经参考项目验证 CF Workers 运行时支持）----
-const cat = (...a) => { const r = new Uint8Array(a.reduce((s, x) => s + x.length, 0)); a.reduce((o, x) => (r.set(x, o), o + x.length), 0); return r; };
-const MAGIC = new Uint8Array([0x21, 0x12, 0xA4, 0x42]);
-const TMT = { AQ: 0x003, AO: 0x103, AE: 0x113, PQ: 0x008, PO: 0x108, CQ: 0x00A, CO: 0x10A, BQ: 0x00B, BO: 0x10B };
-const TAT = { USER: 0x006, MI: 0x008, ERR: 0x009, PEER: 0x012, REALM: 0x014, NONCE: 0x015, TRANSPORT: 0x019, CONNID: 0x02A };
-const tAttr = (t, v) => { const b = new Uint8Array(4 + v.length + (4 - v.length % 4) % 4), d = new DataView(b.buffer); d.setUint16(0, t); d.setUint16(2, v.length); b.set(v, 4); return b; };
-const tMsg = (t, tid, a) => { const bd = cat(...a), h = new Uint8Array(20), d = new DataView(h.buffer); d.setUint16(0, t); d.setUint16(2, bd.length); h.set(MAGIC, 4); h.set(tid, 8); return cat(h, bd); };
-const xorPeer = (ip, port) => { const b = new Uint8Array(8); b[1] = 1; new DataView(b.buffer).setUint16(2, port ^ 0x2112); ip.split('.').forEach((v, i) => b[4 + i] = +v ^ MAGIC[i]); return b; };
-const parseStunT = d => {
-  if (d.length < 20 || MAGIC.some((v, i) => d[4 + i] !== v)) return null;
-  const dv = new DataView(d.buffer, d.byteOffset, d.byteLength), ml = dv.getUint16(2), attrs = {};
-  for (let o = 20; o + 4 <= 20 + ml;) { const t = dv.getUint16(o), l = dv.getUint16(o + 2); if (o + 4 + l > d.length) break; attrs[t] = d.slice(o + 4, o + 4 + l); o += 4 + l + (4 - l % 4) % 4; }
-  return { type: dv.getUint16(0), attrs }; };
-const parseErrT = d => d?.length >= 4 ? (d[2] & 7) * 100 + d[3] : 0;
-const addIntegrityT = async (m, key) => { const c = new Uint8Array(m), d = new DataView(c.buffer); d.setUint16(2, d.getUint16(2) + 24); const k = await crypto.subtle.importKey('raw', key, { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']); return cat(c, tAttr(TAT.MI, new Uint8Array(await crypto.subtle.sign('HMAC', k, c)))); };
-const readStunT = async (rd, buf) => {
-  let b = buf ?? new Uint8Array(0); const pull = async () => { const { done, value } = await rd.read(); if (done) throw 0; b = cat(b, new Uint8Array(value)); };
-  try { while (b.length < 20) await pull(); const n = 20 + (b[2] << 8 | b[3]); while (b.length < n) await pull();
 // HTTP(S) CONNECT 隧道；https 模式下 sock 本身已是 TLS（见 chainConnect 的 secureTransport）
 const doHttpConnect = async (sock, user, pass, host, port) => {
   const w = sock.writable.getWriter(), hr = sock.readable.getReader(), rb = mkRB(hr), enc = new TextEncoder(), dec = new TextDecoder();
@@ -113,11 +97,11 @@ const doHttpConnect = async (sock, user, pass, host, port) => {
   for (;;) { const b = await rb.need(1); const n = new Uint8Array(head.byteLength + 1); n.set(head); n.set(b, head.byteLength); head = n; if (head.byteLength >= 4 && head[head.byteLength - 4] === 13 && head[head.byteLength - 3] === 10 && head[head.byteLength - 2] === 13 && head[head.byteLength - 1] === 10) break; if (head.byteLength > 8192) throw new Error('http proxy header too large'); }
   const statusLine = dec.decode(head).split('\r\n')[0]; if (!/\s2\d\d(\s|$)/.test(statusLine)) throw new Error('http proxy: ' + statusLine);
   const leftover = rb.rest.slice(); w.releaseLock(); hr.releaseLock(); return leftover; };
-// 反代协议分发：socks5/http/https/turn/sstp 全部走真实协议实现
+// 反代协议分发：socks5/http/https 全部走真实协议实现
 const chainConnect = async (fetcher, chain, host, port) => {
   if (chain.proto === 'socks5') { const sock = await raceSprout(fetcher, chain.host, chain.port); const leftover = await doSocks5(sock, chain.user, chain.pass, host, port); return { sock, leftover }; }
   if (chain.proto === 'http') { const sock = await raceSprout(fetcher, chain.host, chain.port); const leftover = await doHttpConnect(sock, chain.user, chain.pass, host, port); return { sock, leftover }; }
-  // https：代理主机是域名走原生 secureTransport（快，Cloudflare 原生 TLS 校验证书）；是裸IP则原生TLS无法校验证书，改走 Mini TLS（跳过校验），对齐 edgetunnel 的 isIPHostname 判断逻辑
+  // https：代理主机走原生 secureTransport
   if (chain.proto === 'https') {
     const sock = await raceSprout(fetcher, chain.host, chain.port, { secureTransport: 'on' }); const leftover = await doHttpConnect(sock, chain.user, chain.pass, host, port); return { sock, leftover };
   }
@@ -131,17 +115,17 @@ const ws = async (req, env) => {
   const relay = c => { if (c.length < 24 || !matchID(c)) return null; let o = 19 + c[17]; const p = (c[o] << 8) | c[o + 1]; let t = c[o + 2]; if (t !== 1) t += 1; const a = parseAddr(c, o + 3, t); return a ? { addrType: t, ...a, port: p } : null; };
   const edStr = req.headers.get('sec-websocket-protocol'); const _edMax = _url.searchParams.has('ed') ? (parseInt(_url.searchParams.get('ed')) || 0) : CFG.maxED; const ed = edStr && _edMax > 0 && edStr.length <= _edMax * 4 / 3 + 4 ? /** @type {*} */ (Uint8Array).fromBase64(edStr, { alphabet: 'base64url' }) : null; let curW = null, sock = null, extraSock = null, closed = false, busy = false;
   const uq = mkQ(CFG.upPack);
-  // extraSock：TURN 的控制连接（承载 allocation），必须和数据连接同生命周期，否则 allocation 被回收、数据连接跟着断
+  // extraSock：预留字段，当前版本不使用
   const wither = () => { if (closed) return; closed = true; uq.clear(); try { curW?.releaseLock(); } catch {} try { sock?.close(); } catch {} try { extraSock?.close(); } catch {} try { server.close(); } catch {} };
   const toU8 = d => d instanceof Uint8Array ? d : ArrayBuffer.isView(d) ? new Uint8Array(d.buffer, d.byteOffset, d.byteLength) : new Uint8Array(d);
   const sow = d => { const u = toU8(d), n = u.byteLength; if (!n) return 1; if (uq.sow(u)) return 1; wither(); return 0; };
   // 反代模式解析，对齐 edgetunnel 真实源码：/video/<加密串> 优先级最高（整块JSON配置，恒定全局），
   // 解密/解析失败则静默降级到下面的三层路径正则 + query 参数形式：
-  // 第一层 /(socks5?|http|https|turn|sstp):// 或 :/ 或 :（0~2个斜杠都认）→ 默认全局，不走直连
+  // 第一层 /(socks5?|http|https):// 或 :/ 或 :（0~2个斜杠都认）→ 默认全局，不走直连
   // 第二层 /xxx=value 或 /gxxx=value（g前缀=全局，否则=直连优先失败降级），支持 s5/gs5 短别名
-  // 第三层（都没匹配到时）用 ?socks5=/?http=/?https=/?turn=/?sstp= 查询参数，?globalproxy 单独控制全局
-  const _defPort = { socks5: 1080, http: 80, https: 443, turn: 3478, sstp: 443 };
-  const _normProto = kw => kw.includes('sstp') ? 'sstp' : kw.includes('turn') ? 'turn' : kw.includes('https') ? 'https' : kw.includes('http') ? 'http' : 'socks5';
+  // 第三层（都没匹配到时）用 ?socks5=/?http=/?https=/ 查询参数，?globalproxy 单独控制全局
+  const _defPort = { socks5: 1080, http: 80, https: 443 };
+  const _normProto = kw => kw.includes('https') ? 'https' : kw.includes('http') ? 'http' : 'socks5';
   let chain = null;
   const _videoM = decodeURIComponent(_url.pathname).match(/\/video\/(.+)$/i);
   if (_videoM) { try { const plain = base64SecretDecode(_videoM[1], _uuidStr); const { type, ...addrObj } = JSON.parse(plain);
@@ -150,10 +134,10 @@ const ws = async (req, env) => {
     const port = Number(addrObj.port); if (isNaN(port)) throw new Error('链式代理端口无效');
     chain = { proto, global: true, user: addrObj.username || '', pass: addrObj.password || '', host: addrObj.hostname, port };
   } catch {} }
-  let _cm = chain ? null : _url.pathname.match(/\/(socks5?|https|http|turn|sstp):\/?\/?([^/?#\s]+)/i);
+  let _cm = chain ? null : _url.pathname.match(/\/(socks5?|https|http):\/?\/?([^/?#\s]+)/i);
   if (_cm) { const proto = _normProto(_cm[1].toLowerCase()); chain = { proto, global: true, ...pTarget(_cm[2], _defPort[proto]) }; }
-  else if (!chain && (_cm = _url.pathname.match(/\/(g?s5|socks5|g?http|g?https|g?turn|g?sstp)=([^/?#\s]+)/i))) { const kw = _cm[1].toLowerCase(); const proto = _normProto(kw); chain = { proto, global: kw.startsWith('g'), ...pTarget(_cm[2], _defPort[proto]) }; }
-  else if (!chain) { const qProto = ['socks5', 'http', 'https', 'turn', 'sstp'].find(p => _url.searchParams.has(p)); if (qProto) chain = { proto: qProto, global: _url.searchParams.has('globalproxy'), ...pTarget(_url.searchParams.get(qProto), _defPort[qProto]) }; }
+  else if (!chain && (_cm = _url.pathname.match(/\/(g?s5|socks5|g?http|g?https)=([^/?#\s]+)/i))) { const kw = _cm[1].toLowerCase(); const proto = _normProto(kw); chain = { proto, global: kw.startsWith('g'), ...pTarget(_cm[2], _defPort[proto]) }; }
+  else if (!chain) { const qProto = ['socks5', 'http', 'https'].find(p => _url.searchParams.has(p)); if (qProto) chain = { proto: qProto, global: _url.searchParams.has('globalproxy'), ...pTarget(_url.searchParams.get(qProto), _defPort[qProto]) }; }
   // PROXYIP：路径（含 proxyip./pyip=/ip= 别名）> query ?proxyip= > env 变量 > 默认兜底域名；不支持全局，始终「直连优先，失败降级」
   const _pathPxyRaw = chain ? '' : (_url.pathname.match(/\/(?:proxyip[.=]|pyip=|ip=)([^?#\s]+)/i)?.[1] || _url.searchParams.get('proxyip') || '');
   const proxyList = (_pathPxyRaw || (env?.PROXYIP || '') || CFG.dproxy).trim().split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
@@ -169,4 +153,3 @@ const ws = async (req, env) => {
   server.addEventListener('message', e => { closed || (sow(e.data) && thresh()); });
   server.addEventListener('close', () => wither()); server.addEventListener('error', () => wither());
   return new Response(null, { status: 101, webSocket: client, headers: { 'Sec-WebSocket-Extensions': '' } }); };
-}}
