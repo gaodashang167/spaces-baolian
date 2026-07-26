@@ -388,6 +388,16 @@ http {
 NGINXEOF
 }
 
+reset_credentials_if_needed() {
+  # 如果存储是持久化的，历史遗留的过期凭据会一直导致 401。
+  # 需要时在环境变量里设 RESET_CREDENTIALS=1 重构一次即可清掉。
+  if [ "${RESET_CREDENTIALS:-0}" = "1" ]; then
+    warn "RESET_CREDENTIALS=1，清空 ${OPENCLAW_DIR}/credentials"
+    rm -rf "${OPENCLAW_DIR}/credentials"
+    mkdir -p "${OPENCLAW_DIR}/credentials"
+  fi
+}
+
 restore_from_github() {
   if [ -f "/root/.backup-secrets/github-token" ]; then
     GITHUB_TOKEN="$(cat "/root/.backup-secrets/github-token")"
@@ -420,10 +430,13 @@ restore_from_github() {
     return 1
   fi
 
+  # ⚠️ 不要恢复 /root/.openclaw/credentials/
+  # provider 凭据一律由环境变量 -> generate_openclaw_json 生成，
+  # 从备份还原会用过期凭据覆盖新 key，导致 provider 返回 HTTP 401。
+  # 同理 agents/main/sessions/（trajectory，160MB+）不恢复，避免超时。
   for src in \
     /root/.openclaw/workspace/ \
     /root/.openclaw/sessions/ \
-    /root/.openclaw/credentials/ \
     /root/.openclaw/identity/ \
     /root/.openclaw/devices/ \
     /root/.openclaw/memory/; do
@@ -438,6 +451,8 @@ restore_from_github() {
   done
 
   echo "  ⏭️  跳过恢复: /root/.openclaw/openclaw.json（使用环境变量生成的版本）"
+  echo "  ⏭️  跳过恢复: /root/.openclaw/credentials/（凭据只认环境变量）"
+  echo "  ⏭️  跳过恢复: /root/.openclaw/agents/main/sessions/（trajectory 太大）"
   rm -rf /tmp/openclaw-gitrestore
   log "GitHub 恢复完成"
 }
@@ -636,6 +651,7 @@ main() {
   generate_openclaw_json
   write_nginx_conf
 
+  reset_credentials_if_needed
   restore_from_github || true
   restore_from_rclone || true
 
