@@ -15,7 +15,8 @@ GITHUB_REPO="https://github.com/gaodashang167/openclaw-backup.git"
 GITHUB_TOKEN_FILE="/root/.backup-secrets/github-token"
 BACKUP_DIR="/tmp/openclaw-gitbackup"
 # 备份 workspace、session 和配置文件（排除 exec-approvals.json）
-BACKUP_FILES="/root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/ /root/.openclaw/openclaw.json /root/.openclaw/credentials/ /root/.openclaw/identity/ /root/.openclaw/devices/ /root/.openclaw/memory/"
+# 排除 agents/main/sessions/ 中的 trajectory.jsonl / .bak / .reset 等大文件
+BACKUP_FILES="/root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/openclaw.json /root/.openclaw/credentials/ /root/.openclaw/identity/ /root/.openclaw/devices/ /root/.openclaw/memory/"
 
 # ---- Rclone 配置（旧模式） ----
 OPENCLAW_PATHS="
@@ -110,6 +111,12 @@ git_backup() {
 src/root/.openclaw/exec-approvals.json
 GITIGNORE
 
+    # 排除大文件：trajectory.jsonl（重启后自动重建，无需备份）
+    find src/root/.openclaw/agents/main/sessions/ -name '*.trajectory.jsonl' -delete 2>/dev/null || true
+    # 排除 .bak 备份文件
+    find src/root/.openclaw/agents/main/sessions/ -name '*.bak-*' -delete 2>/dev/null || true
+    # 排除 reset 文件
+    find src/root/.openclaw/agents/main/sessions/ -name '*.reset.*' -delete 2>/dev/null || true
     git add -A
     if git diff --cached --quiet; then
         echo "✅ 无变更，跳过提交"
