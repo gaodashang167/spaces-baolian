@@ -420,8 +420,6 @@ restore_from_github() {
     return 1
   fi
 
-  # 恢复列表（跳过 openclaw.json，credentials 中的 telegram-default-allowFrom.json 会被恢复）
-  # 注意：credentials/ 目录会恢复，但 telegram-pairing.json 会在恢复后被清除以允许新配对
   for src in \
     /root/.openclaw/workspace/ \
     /root/.openclaw/sessions/ \
@@ -434,27 +432,13 @@ restore_from_github() {
     dest="/tmp/openclaw-gitrestore/src${src}"
     if [ -d "$dest" ]; then
       mkdir -p "$src"
-      # 排除 .git（版本控制）和 .trajectory*（OpenClaw 内部上下文日志，无需恢复）
-      tar cf - -C "$dest" --exclude='.git' --exclude='.trajectory*' --exclude='*.trajectory-path.json' . 2>/dev/null | tar xf - -C "$src" --no-same-owner 2>/dev/null || \
+      tar cf - -C "$dest" --exclude='.git' . 2>/dev/null | tar xf - -C "$src" --no-same-owner 2>/dev/null || \
       cp -rf "${dest}/" "${src}/"
       echo "  📁 恢复: $src"
     fi
   done
 
   echo "  ⏭️  跳过恢复: /root/.openclaw/openclaw.json（使用环境变量生成的版本）"
-
-  # 🔒 恢复 credentials 后，清空 telegram-pairing.json 以允许新配对请求
-  # （telegram-default-allowFrom.json 保留，确保白名单不丢失）
-  if [ -d /root/.openclaw/credentials ]; then
-    cat > /root/.openclaw/credentials/telegram-pairing.json << 'EOF'
-{
-  "version": 1,
-  "requests": []
-}
-EOF
-    echo "  🔄 已清除旧的 telegram 配对请求，等待新配对"
-  fi
-
   rm -rf /tmp/openclaw-gitrestore
   log "GitHub 恢复完成"
 }
