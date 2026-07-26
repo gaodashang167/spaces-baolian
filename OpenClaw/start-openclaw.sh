@@ -424,7 +424,7 @@ restore_from_github() {
     /root/.openclaw/workspace/ \
     /root/.openclaw/sessions/ \
     /root/.openclaw/agents/main/sessions/ \
-    /root/.openclaw/credentials/ \
+    # ⚠️ 跳过 credentials/（通过环境变量动态生成，不需要恢复）\
     /root/.openclaw/identity/ \
     /root/.openclaw/devices/ \
     /root/.openclaw/memory/; do
