@@ -15,8 +15,11 @@ GITHUB_REPO="https://github.com/gaodashang167/openclaw-backup.git"
 GITHUB_TOKEN_FILE="/root/.backup-secrets/github-token"
 BACKUP_DIR="/tmp/openclaw-gitbackup"
 # 备份 workspace、session 和配置文件（排除 exec-approvals.json）
-# 排除 agents/main/sessions/ 中的 trajectory.jsonl / .bak / .reset 等大文件
-BACKUP_FILES="/root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/openclaw.json /root/.openclaw/credentials/ /root/.openclaw/identity/ /root/.openclaw/devices/ /root/.openclaw/memory/"
+# ⚠️ 不备份以下内容：
+#   credentials/          —— 凭据只认环境变量，备份后还原会用过期凭据覆盖新 key（HTTP 401）
+#   openclaw.json         —— 内含明文 apiKey / gateway 密码 / botToken，不进仓库
+#   agents/main/sessions/ —— trajectory.jsonl 单个 10MB，会把仓库撑到几百 MB 拖慢恢复
+BACKUP_FILES="/root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/identity/ /root/.openclaw/devices/ /root/.openclaw/memory/"
 
 # ---- Rclone 配置（旧模式） ----
 OPENCLAW_PATHS="
@@ -109,14 +112,20 @@ git_backup() {
     cat > "$BACKUP_DIR/.gitignore" << 'GITIGNORE'
 .backup-secrets/
 src/root/.openclaw/exec-approvals.json
+src/root/.openclaw/credentials/
+src/root/.openclaw/openclaw.json
+src/root/.openclaw/agents/
 GITIGNORE
 
-    # 排除大文件：trajectory.jsonl（重启后自动重建，无需备份）
-    find src/root/.openclaw/agents/main/sessions/ -name '*.trajectory.jsonl' -delete 2>/dev/null || true
-    # 排除 .bak 备份文件
-    find src/root/.openclaw/agents/main/sessions/ -name '*.bak-*' -delete 2>/dev/null || true
-    # 排除 reset 文件
-    find src/root/.openclaw/agents/main/sessions/ -name '*.reset.*' -delete 2>/dev/null || true
+    # 清掉历史上误提交的敏感/超大内容（.gitignore 对已跟踪文件无效）
+    git rm -r --cached --ignore-unmatch \
+        "src/root/.openclaw/credentials" \
+        "src/root/.openclaw/openclaw.json" \
+        "src/root/.openclaw/agents" >/dev/null 2>&1 || true
+    rm -rf "$BACKUP_DIR/src/root/.openclaw/credentials" \
+           "$BACKUP_DIR/src/root/.openclaw/openclaw.json" \
+           "$BACKUP_DIR/src/root/.openclaw/agents"
+
     git add -A
     if git diff --cached --quiet; then
         echo "✅ 无变更，跳过提交"
@@ -125,8 +134,12 @@ GITIGNORE
 
     TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
     git commit -m "backup: $TIMESTAMP"
-    git push "$REPO_URL" HEAD:main 2>/dev/null
-    echo "✅ GitHub 备份完成: $TIMESTAMP"
+    if git push "$REPO_URL" HEAD:main; then
+        echo "✅ GitHub 备份完成: $TIMESTAMP"
+    else
+        echo "❌ GitHub 推送失败（备份未生效）"
+        return 1
+    fi
 }
 
 # ============================================================
