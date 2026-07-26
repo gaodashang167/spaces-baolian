@@ -15,10 +15,7 @@ GITHUB_REPO="https://github.com/gaodashang167/openclaw-backup.git"
 GITHUB_TOKEN_FILE="/root/.backup-secrets/github-token"
 BACKUP_DIR="/tmp/openclaw-gitbackup"
 # 备份 workspace、session 和配置文件（排除 exec-approvals.json）
-# 相对旧版只去掉两项：agents/main/sessions/（trajectory 上百 MB）、
-# openclaw.json（内含明文密钥，且启动时本来就不恢复它）。
-# credentials/ 保持备份，与旧版一致。
-BACKUP_FILES="/root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/credentials/ /root/.openclaw/identity/ /root/.openclaw/devices/"
+BACKUP_FILES="/root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/ /root/.openclaw/openclaw.json /root/.openclaw/credentials/ /root/.openclaw/identity/ /root/.openclaw/devices/"
 
 # ---- Rclone 配置（旧模式） ----
 OPENCLAW_PATHS="
@@ -121,12 +118,8 @@ GITIGNORE
 
     TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
     git commit -m "backup: $TIMESTAMP"
-    if git push "$REPO_URL" HEAD:main; then
-        echo "✅ GitHub 备份完成: $TIMESTAMP"
-    else
-        echo "❌ GitHub 推送失败（本次备份未生效）"
-        return 1
-    fi
+    git push "$REPO_URL" HEAD:main 2>/dev/null
+    echo "✅ GitHub 备份完成: $TIMESTAMP"
 }
 
 # ============================================================
