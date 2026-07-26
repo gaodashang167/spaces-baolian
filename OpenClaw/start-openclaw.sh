@@ -420,16 +420,14 @@ restore_from_github() {
     return 1
   fi
 
-  # 相对旧版只去掉两项：
-  #   agents/main/sessions/ —— trajectory.jsonl 上百 MB，恢复慢
-  #   memory/               —— 恢复回来的 *.migrated 边车会让网关拒绝启动（502）
-  # credentials/ 保持恢复，与旧版一致。
   for src in \
     /root/.openclaw/workspace/ \
     /root/.openclaw/sessions/ \
+    /root/.openclaw/agents/main/sessions/ \
     /root/.openclaw/credentials/ \
     /root/.openclaw/identity/ \
-    /root/.openclaw/devices/; do
+    /root/.openclaw/devices/ \
+    /root/.openclaw/memory/; do
 
     dest="/tmp/openclaw-gitrestore/src${src}"
     if [ -d "$dest" ]; then
@@ -441,23 +439,8 @@ restore_from_github() {
   done
 
   echo "  ⏭️  跳过恢复: /root/.openclaw/openclaw.json（使用环境变量生成的版本）"
-  echo "  ⏭️  跳过恢复: /root/.openclaw/memory/（索引自动重建）"
-  echo "  ⏭️  跳过恢复: /root/.openclaw/agents/main/sessions/（trajectory 太大）"
   rm -rf /tmp/openclaw-gitrestore
   log "GitHub 恢复完成"
-}
-
-clean_memory_leftovers() {
-  # 残留的 *.migrated 边车会让 openclaw 判定 "migrations did not complete
-  # cleanly" 并拒绝启动网关（7861 不监听 -> nginx 502）。挪走而非删除。
-  local d="${OPENCLAW_DIR}/memory"
-  [ -d "$d" ] || return 0
-  local f
-  for f in "$d"/*.migrated; do
-    [ -e "$f" ] || continue
-    warn "发现迁移残留 $f，移到 /tmp"
-    mv -f "$f" "/tmp/$(basename "$f").$(date +%s)" 2>/dev/null || rm -f "$f"
-  done
 }
 
 restore_from_rclone() {
@@ -657,7 +640,6 @@ main() {
   restore_from_github || true
   restore_from_rclone || true
 
-  clean_memory_leftovers || true
   run_openclaw_doctor || true
   start_periodic_backup
 
