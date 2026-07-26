@@ -25,15 +25,14 @@ OPENCLAW_PATHS="
 /root/.openclaw/openclaw.json
 "
 
-# ---- 工具函数: 复制目录但排除 .git 和 .trajectory* ----
-# 排除 .git（版本控制）、.trajectory*（OpenClaw 内部上下文日志，无需跨机器恢复）
+# ---- 工具函数: 复制目录但排除 .git ----
 copy_dir_no_git() {
   _s="$1"; _d="$2"
   mkdir -p "$_d"
   if command -v rsync >/dev/null 2>&1; then
-    rsync -a --exclude='.git' --exclude='.trajectory*' --exclude='*.trajectory-path.json' --delete "$_s/" "$_d/"
+    rsync -a --exclude='.git' --delete "$_s/" "$_d/"
   else
-    tar cf - -C "$_s" --exclude='.git' --exclude='.trajectory*' --exclude='*.trajectory-path.json' . 2>/dev/null | tar xf - -C "$_d" --no-same-owner 2>/dev/null
+    tar cf - -C "$_s" --exclude='.git' . 2>/dev/null | tar xf - -C "$_d" --no-same-owner 2>/dev/null
   fi
 }
 
