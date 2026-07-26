@@ -15,7 +15,10 @@ GITHUB_REPO="https://github.com/gaodashang167/openclaw-backup.git"
 GITHUB_TOKEN_FILE="/root/.backup-secrets/github-token"
 BACKUP_DIR="/tmp/openclaw-gitbackup"
 # 备份 workspace、session 和配置文件（排除 exec-approvals.json）
-BACKUP_FILES="/root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/ /root/.openclaw/openclaw.json /root/.openclaw/credentials/ /root/.openclaw/identity/ /root/.openclaw/devices/"
+# 相对旧版只去掉 openclaw.json（内含明文 apiKey / gateway 密码 / botToken，
+# 而且启动时本来就跳过恢复它）。其余全部保留，尤其 agents/main/sessions/ —— 
+# 少了它 agent 启动会失败，报错被包装成 "Authentication failed at the provider"。
+BACKUP_FILES="/root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/ /root/.openclaw/credentials/ /root/.openclaw/identity/ /root/.openclaw/devices/"
 
 # ---- Rclone 配置（旧模式） ----
 OPENCLAW_PATHS="
@@ -51,6 +54,27 @@ sanitize_dir_tokens() {
       sed -i 's/ghp_[A-Za-z0-9_]\{20,\}/[FILTERED_GITHUB_TOKEN]/g' "$_f" 2>/dev/null
     done
   fi
+}
+
+# ---- 工具函数: 清理备份副本里的大文件/垃圾文件 ----
+# 只对 /tmp 下的备份副本动手，/root/.openclaw/ 里的实时文件一个都不碰。
+# 目录结构照常备份，agent 恢复后认得出来；只是不带那些几十上百 MB 的日志。
+prune_backup_noise() {
+    _root="$BACKUP_DIR/src/root/.openclaw"
+    [ -d "$_root" ] || return 0
+    _before=$(du -sh "$_root" 2>/dev/null | cut -f1)
+    find "$_root" -type f \( \
+        -name '*.trajectory.jsonl' -o \
+        -name '*.jsonl.lock'       -o \
+        -name '*.lock'             -o \
+        -name '*.bak-*'            -o \
+        -name '*.reset.*'          -o \
+        -name '*.sqlite-wal'       -o \
+        -name '*.sqlite-shm'       -o \
+        -name '*.migrated'         \
+    \) -delete 2>/dev/null
+    _after=$(du -sh "$_root" 2>/dev/null | cut -f1)
+    echo "🧹 精简备份副本: ${_before:-?} -> ${_after:-?}"
 }
 
 # ============================================================
@@ -100,6 +124,9 @@ git_backup() {
         fi
     done
 
+    # 精简：去掉 trajectory / 锁文件 / sqlite 边车等
+    prune_backup_noise
+
     # 过滤敏感信息
     echo "🔒 过滤敏感信息..."
     sanitize_dir_tokens "$BACKUP_DIR/src/root"
@@ -108,6 +135,15 @@ git_backup() {
     cat > "$BACKUP_DIR/.gitignore" << 'GITIGNORE'
 .backup-secrets/
 src/root/.openclaw/exec-approvals.json
+src/root/.openclaw/openclaw.json
+src/root/.openclaw/memory/
+*.trajectory.jsonl
+*.lock
+*.bak-*
+*.reset.*
+*.sqlite-wal
+*.sqlite-shm
+*.migrated
 GITIGNORE
 
     git add -A
@@ -118,8 +154,12 @@ GITIGNORE
 
     TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
     git commit -m "backup: $TIMESTAMP"
-    git push "$REPO_URL" HEAD:main 2>/dev/null
-    echo "✅ GitHub 备份完成: $TIMESTAMP"
+    if git push "$REPO_URL" HEAD:main; then
+        echo "✅ GitHub 备份完成: $TIMESTAMP"
+    else
+        echo "❌ GitHub 推送失败（本次备份未生效）"
+        return 1
+    fi
 }
 
 # ============================================================
