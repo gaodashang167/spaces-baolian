@@ -423,7 +423,6 @@ restore_from_github() {
   for src in \
     /root/.openclaw/workspace/ \
     /root/.openclaw/sessions/ \
-    /root/.openclaw/agents/main/sessions/ \
     /root/.openclaw/credentials/ \
     /root/.openclaw/identity/ \
     /root/.openclaw/devices/ \
