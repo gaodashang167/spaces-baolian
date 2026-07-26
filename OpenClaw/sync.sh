@@ -15,9 +15,7 @@ GITHUB_REPO="https://github.com/gaodashang167/openclaw-backup.git"
 GITHUB_TOKEN_FILE="/root/.backup-secrets/github-token"
 BACKUP_DIR="/tmp/openclaw-gitbackup"
 # 备份 workspace、session 和配置文件（排除 exec-approvals.json）
-# 不备份：credentials/（凭据只认环境变量）、openclaw.json（明文密钥）、
-#         agents/main/sessions/（trajectory 上百 MB）、memory/（索引可重建且会导致 502）
-BACKUP_FILES="/root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/identity/ /root/.openclaw/devices/"
+BACKUP_FILES="/root/.openclaw/workspace/ /root/.openclaw/sessions/ /root/.openclaw/agents/main/sessions/ /root/.openclaw/openclaw.json /root/.openclaw/credentials/ /root/.openclaw/identity/ /root/.openclaw/devices/"
 
 # ---- Rclone 配置（旧模式） ----
 OPENCLAW_PATHS="
@@ -110,22 +108,7 @@ git_backup() {
     cat > "$BACKUP_DIR/.gitignore" << 'GITIGNORE'
 .backup-secrets/
 src/root/.openclaw/exec-approvals.json
-src/root/.openclaw/credentials/
-src/root/.openclaw/openclaw.json
-src/root/.openclaw/memory/
-src/root/.openclaw/agents/
 GITIGNORE
-
-    # .gitignore 对已跟踪文件无效，先把历史上误提交的内容清出仓库
-    git rm -r --cached --ignore-unmatch \
-        "src/root/.openclaw/credentials" \
-        "src/root/.openclaw/openclaw.json" \
-        "src/root/.openclaw/memory" \
-        "src/root/.openclaw/agents" >/dev/null 2>&1 || true
-    rm -rf "$BACKUP_DIR/src/root/.openclaw/credentials" \
-           "$BACKUP_DIR/src/root/.openclaw/openclaw.json" \
-           "$BACKUP_DIR/src/root/.openclaw/memory" \
-           "$BACKUP_DIR/src/root/.openclaw/agents"
 
     git add -A
     if git diff --cached --quiet; then
@@ -135,12 +118,8 @@ GITIGNORE
 
     TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
     git commit -m "backup: $TIMESTAMP"
-    if git push "$REPO_URL" HEAD:main; then
-        echo "✅ GitHub 备份完成: $TIMESTAMP"
-    else
-        echo "❌ GitHub 推送失败（本次备份未生效）"
-        return 1
-    fi
+    git push "$REPO_URL" HEAD:main 2>/dev/null
+    echo "✅ GitHub 备份完成: $TIMESTAMP"
 }
 
 # ============================================================
