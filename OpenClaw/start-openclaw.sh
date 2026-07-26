@@ -432,7 +432,8 @@ restore_from_github() {
     dest="/tmp/openclaw-gitrestore/src${src}"
     if [ -d "$dest" ]; then
       mkdir -p "$src"
-      tar cf - -C "$dest" --exclude='.git' . 2>/dev/null | tar xf - -C "$src" --no-same-owner 2>/dev/null || \
+      # 排除 .git（版本控制）和 .trajectory*（OpenClaw 内部上下文日志，无需恢复）
+      tar cf - -C "$dest" --exclude='.git' --exclude='.trajectory*' --exclude='*.trajectory-path.json' . 2>/dev/null | tar xf - -C "$src" --no-same-owner 2>/dev/null || \
       cp -rf "${dest}/" "${src}/"
       echo "  📁 恢复: $src"
     fi
