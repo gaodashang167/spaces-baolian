@@ -420,11 +420,12 @@ restore_from_github() {
     return 1
   fi
 
+  # ⚠️ 恢复列表刻意不含 credentials/（通过环境变量动态生成，不需要恢复）
+  # 注意：注释不能夹在下面的 \ 续行中间，否则 bash 语法错误
   for src in \
     /root/.openclaw/workspace/ \
     /root/.openclaw/sessions/ \
     /root/.openclaw/agents/main/sessions/ \
-    # ⚠️ 跳过 credentials/（通过环境变量动态生成，不需要恢复）\
     /root/.openclaw/identity/ \
     /root/.openclaw/devices/ \
     /root/.openclaw/memory/; do
