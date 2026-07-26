@@ -388,16 +388,6 @@ http {
 NGINXEOF
 }
 
-reset_credentials_if_needed() {
-  # 如果存储是持久化的，历史遗留的过期凭据会一直导致 401。
-  # 需要时在环境变量里设 RESET_CREDENTIALS=1 重构一次即可清掉。
-  if [ "${RESET_CREDENTIALS:-0}" = "1" ]; then
-    warn "RESET_CREDENTIALS=1，清空 ${OPENCLAW_DIR}/credentials"
-    rm -rf "${OPENCLAW_DIR}/credentials"
-    mkdir -p "${OPENCLAW_DIR}/credentials"
-  fi
-}
-
 restore_from_github() {
   if [ -f "/root/.backup-secrets/github-token" ]; then
     GITHUB_TOKEN="$(cat "/root/.backup-secrets/github-token")"
@@ -430,16 +420,16 @@ restore_from_github() {
     return 1
   fi
 
-  # ⚠️ 不要恢复 /root/.openclaw/credentials/
-  # provider 凭据一律由环境变量 -> generate_openclaw_json 生成，
-  # 从备份还原会用过期凭据覆盖新 key，导致 provider 返回 HTTP 401。
-  # 同理 agents/main/sessions/（trajectory，160MB+）不恢复，避免超时。
+  # 只恢复这四项。其余三项刻意不恢复：
+  #   agents/main/sessions/ —— trajectory.jsonl 上百 MB，恢复慢/超时
+  #   credentials/          —— 过期凭据会覆盖环境变量生成的新 key（HTTP 401）
+  #   memory/               —— SQLite 索引是派生数据，恢复回来的 *.migrated
+  #                            边车会让网关拒绝启动（502），由 ensure_memory_index 重建
   for src in \
     /root/.openclaw/workspace/ \
     /root/.openclaw/sessions/ \
     /root/.openclaw/identity/ \
-    /root/.openclaw/devices/ \
-    /root/.openclaw/memory/; do
+    /root/.openclaw/devices/; do
 
     dest="/tmp/openclaw-gitrestore/src${src}"
     if [ -d "$dest" ]; then
@@ -452,9 +442,24 @@ restore_from_github() {
 
   echo "  ⏭️  跳过恢复: /root/.openclaw/openclaw.json（使用环境变量生成的版本）"
   echo "  ⏭️  跳过恢复: /root/.openclaw/credentials/（凭据只认环境变量）"
+  echo "  ⏭️  跳过恢复: /root/.openclaw/memory/（索引自动重建）"
   echo "  ⏭️  跳过恢复: /root/.openclaw/agents/main/sessions/（trajectory 太大）"
   rm -rf /tmp/openclaw-gitrestore
   log "GitHub 恢复完成"
+}
+
+clean_memory_leftovers() {
+  # 迁移完成后残留的 *.migrated 边车文件会让 openclaw 判定
+  # "startup migrations did not complete cleanly" 并拒绝启动网关，
+  # 表现为 7861 端口一直不监听、nginx 报 502。挪走而不是删除，便于回查。
+  local d="${OPENCLAW_DIR}/memory"
+  [ -d "$d" ] || return 0
+  local f
+  for f in "$d"/*.migrated; do
+    [ -e "$f" ] || continue
+    warn "发现迁移残留 $f，移到 /tmp"
+    mv -f "$f" "/tmp/$(basename "$f").$(date +%s)" 2>/dev/null || rm -f "$f"
+  done
 }
 
 restore_from_rclone() {
@@ -651,10 +656,10 @@ main() {
   generate_openclaw_json
   write_nginx_conf
 
-  reset_credentials_if_needed
   restore_from_github || true
   restore_from_rclone || true
 
+  clean_memory_leftovers || true
   run_openclaw_doctor || true
   start_periodic_backup
 
