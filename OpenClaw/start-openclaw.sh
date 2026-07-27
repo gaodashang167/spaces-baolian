@@ -295,9 +295,13 @@ if tg_bot_token:
     tg_cfg = {
         "enabled": True,
         "botToken": tg_bot_token,
-        "dmPolicy": "open",           # open: 无需配对；all users可直接对话
-        "allowFrom": ["**"],          # 开放所有用户
+        "dmPolicy": "pairing",
         "groups": {"*": {"requireMention": True}},
+        "webhookUrl": "https://nishishabiba-goubiba.hf.space/telegram/webhook",
+        "webhookSecret": gw_password,
+        "webhookPath": "/telegram/webhook",
+        "webhookHost": "0.0.0.0",
+        "webhookPort": 8787
     }
     if tg_api_root:
         tg_cfg["apiRoot"] = tg_api_root
